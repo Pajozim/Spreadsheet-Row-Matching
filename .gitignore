@@ -1,0 +1,12 @@
+__pycache__/
+/xlsx_files/*
+*.code-workspace
+*.xls*
+get-pip.py
+Nuevo documento de texto.txt
+.env
+*.db
+z_*
+config.*
+.venv/
+.vscode/
