@@ -1,6 +1,7 @@
+import streamlit as st
+import uuid
 from pathlib import Path
 from config import XLSX_DIR
-import streamlit as st
 from openpyxl import Workbook
 from src.excel_automation.py_files.process_catalogues import process_ctlg_files, process_workbooks
 
@@ -48,23 +49,29 @@ def col_to_num(col: str) -> int | None:
 def add_filter_callback() -> None:
     """Callback to append a new empty filter dictionary."""
     st.session_state["selected_parameters"]["filters"].append({
+        "id": str(uuid.uuid4()),
         "targ_col_raw": "",
         "omit_row_when": ""
     })
 
-def delete_filter_callback(index: int) -> None:
-    """Callback to remove a filter by index."""
+def delete_filter_callback(f_id: str) -> None:
     filters = st.session_state["selected_parameters"]["filters"]
-    if 0 <= index < len(filters):
-        filters.pop(index)
-
-def parse_target_cols(targ_col_str: str) -> list:
-    """Helper to parse raw text input into column numbers."""
-    if not targ_col_str.strip():
-        return [None]
-    return [
-        num
-        for c in targ_col_str.split(",") 
-        if (num := col_to_num(c)) is not None
+    st.session_state["selected_parameters"]["filters"] = [
+        f for f in filters if f["id"] != f_id
     ]
 
+
+def add_merge_group(selected_cols, delimiter, custom_name):
+    if len(selected_cols) > 1:
+        import uuid
+        st.session_state["merged_groups"].append({
+            "id": str(uuid.uuid4())[:8],
+            "name": custom_name if custom_name else "".join(selected_cols),
+            "cols": selected_cols,
+            "delimiter": delimiter
+        })
+
+def remove_merge_group(group_id):
+    st.session_state["merged_groups"] = [
+        g for g in st.session_state["merged_groups"] if g["id"] != group_id
+    ]

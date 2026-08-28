@@ -2,9 +2,10 @@
 from pathlib import Path
 import streamlit as st
 import config as cfg
+import pandas as pd
 
-from src.excel_automation.py_files.process_catalogues import process_workbooks
-from src.excel_automation.py_files.stlt_helpers import get_xlsx_files, get_cache, col_to_num, delete_filter_callback, add_filter_callback, parse_target_cols
+from src.excel_automation.py_files.process_catalogues import process_workbooks, random_3rows
+from src.excel_automation.py_files.stlt_helpers import get_xlsx_files, get_cache, col_to_num, add_filter_callback, delete_filter_callback, add_merge_group, remove_merge_group 
 
 print("Starting Streamlit ... \n")
 
@@ -22,21 +23,22 @@ if "initialized" not in st.session_state:
     st.session_state.update({
         "detected_files": [],
         "workbooks": [],
-        "selected_sheets": [],
+        "slctd_sheet_titles": [],
         "selected_parameters": {
             "min_col": 1, 
             "max_col": None, 
             "min_row": 1, 
-            "max_row": None, 
-            "filter_count": 0, 
+            "max_row": None,
             "filters": []
         },
         "indexing_running": False,
         "steps": [False, False, False, False, False, False],
         "initialized": True  # Prevents state from resetting on subsequent reruns
     })
-
-print("Starting Streamlit cycle...\n")
+if "merged_groups" not in st.session_state:
+    st.session_state["merged_groups"] = []  # List of dicts: {"name": str, "cols": list[str], "delimiter": str}
+if "column_renames" not in st.session_state:
+    st.session_state["column_renames"] = {}  # {orig_col: custom_name}
 
 
 # # SECTION: INSTRUCTION FOR "FILE PATHS" =========================================
@@ -136,7 +138,7 @@ if st.session_state["steps"][0]:
             apply_button = st.form_submit_button(label="Apply Filter")
 
             if apply_button:
-                st.session_state["selected_sheets"] = selected_sheets
+                st.session_state["slctd_sheet_titles"] = selected_sheets
                 st.session_state["steps"][1] = True
 
         if not st.session_state["steps"][1]:
@@ -192,7 +194,7 @@ if st.session_state["steps"][0]:
 
         with p_col4:
             st.markdown("**Additional Filters**")
-            st.text("Select additional filters:")
+            st.info("Any empty rows are automatically omitted (including those with accidental whitespaces).")
 
             # 1. Render existing filter forms dynamically inside p_col4
             filters = st.session_state["selected_parameters"]["filters"]
@@ -203,17 +205,18 @@ if st.session_state["steps"][0]:
                     
                     # Read and bind inputs using unique state keys
                     f["targ_col_raw"] = st.text_input(
-                        label="In column (leave empty for all):",
+                        label="Omit row when in column (leave empty for all):",
                         value=f.get("targ_col_raw", ""),
                         placeholder="e.g.: B",
-                        key=f"targ_col_{idx}"
+                        key=f"targ_col_{f['id']}"
                     )
                     
                     f["omit_row_when"] = st.text_input(
-                        label="Has (leave empty for empty cell):",
+                        label="the cell has (leave empty for empty cell):",
                         value=f.get("omit_row_when", ""),
                         placeholder="e.g.: Sidenote",
-                        key=f"omit_when_{idx}"
+                        key=f"omit_when_{f['id']}",
+                        help="* for anything not empty; for more words (or anything) separate them by ,/comma or ;/semicolon;"
                     )
 
                     # Validation message directly under the inputs
@@ -223,10 +226,10 @@ if st.session_state["steps"][0]:
                     # Delete button with clean callback passing index
                     st.button(
                         "Delete filter",
-                        key=f"del_{idx}",
+                        key=f"del_{f['id']}",
                         use_container_width=True,
                         on_click=delete_filter_callback,
-                        args=[idx]
+                        args=[f["id"]]
                     )
 
             # 2. Add Filter Button (Triggers pure state update via callback)
@@ -244,33 +247,162 @@ if st.session_state["steps"][0]:
             if apply_cond_filters:
                 # Pre-parse inputs upon final submission
                 for f in filters:
-                    f["parsed_tCol"] = parse_target_cols(f["targ_col_raw"])
+                    f["parsed_tCol"] = col_to_num(f["targ_col_raw"])
                     
                 st.session_state["steps"][4] = True  # Assuming 0-indexed step 4
 
             if st.session_state["steps"][4]:
-                st.success("✓ Applied")
+                st.success("✓")
             else:
                 st.info("Please confirm selection of conditional filters.")
 
-elif st.session_state["steps"][1] and st.session_state["steps"][2] and st.session_state["steps"][3] and st.session_state["steps"][4]:    
-    st.success(f"✓ Step 2 completed. Ready for data extraction.")
 else:
     st.info("Waiting for completion of step 1 ...")
+
+if st.session_state["steps"][1] and st.session_state["steps"][2] and st.session_state["steps"][3] and st.session_state["steps"][4]:    
+    st.success(f"✓ Step 2 completed. Ready for data extraction.")
 
 
 # SECTION: DATABASE STRUCTURIZING ==========================================
 
+
 st.divider()
 
-if st.session_state["steps"][2]:
+if st.session_state["steps"][4]:
 
     st.subheader("Step 3: Database Architecture")
 
-elif st.session_state["steps"][3]:
-    st.success(f"✓ Step 3 completed. Ready to transfer data onto database.")
+    # Mock sample dataframe (representing the output of random_3rows)
+    sample_df: pd.DataFrame = random_3rows(st.session_state["slctd_sheet_titles"])
+
+    # --- 1. SAMPLE ROWS DISPLAY ---
+    st.subheader("1. Sample 3 Rows Preview")
+    st.caption("Representation of 3 random rows picked from your selected worksheet(s):")
+
+    # Display raw sampled data
+    st.dataframe(sample_df, use_container_width=True)
+
+    st.divider()
+
+    # --- 2. CLICK-TO-RENAME COLUMNS ---
+    st.subheader("2. Rename Column Headers")
+    cols = list(sample_df.columns)
+
+    # Render side-by-side rename inputs for each column
+    rename_cols = st.columns(len(cols))
+    for idx, col in enumerate(cols):
+        with rename_cols[idx]:
+            new_name = st.text_input(
+                label=f"Rename `{col}`",
+                value=st.session_state["column_renames"].get(col, col),
+                key=f"rename_{col}"
+            )
+            st.session_state["column_renames"][col] = new_name
+
+    st.divider()
+
+    # --- 3. MERGE / UN-MERGE BLOCK MANAGER ---
+    st.subheader("3. Merge Columns")
+
+    c1, c2 = st.columns([1, 1], gap="large")
+
+    with c1:
+        st.markdown("#### Create New Merged Group")
+        
+        # Available columns to pick from
+        selected_to_merge = st.multiselect(
+            "Select columns you want to merge:",
+            options=cols,
+            format_func=lambda x: f"{x} ({st.session_state['column_renames'].get(x, x)})"
+        )
+
+        delim_choice = st.selectbox(
+            "Select or type delimiter:",
+            options=[" Space ( ' ' )", "Hyphen ( - )", "Underscore ( _ )", "Comma ( , )",  "No Delimiter", "Custom"]
+        )
+        
+        actual_delimiter = ""
+        if delim_choice == " Space ( ' ' )": actual_delimiter = " "
+        elif delim_choice == "Hyphen ( - )": actual_delimiter = "-"
+        elif delim_choice == "Underscore ( _ )": actual_delimiter = "_"
+        elif delim_choice == "Comma ( , )": actual_delimiter = ", "
+        elif delim_choice == "No Delimiter": actual_delimiter = ""
+        elif delim_choice == "Custom":
+            actual_delimiter = st.text_input("Custom Delimiter Symbol:", value="-")
+
+        merged_col_name = st.text_input("Merged Column Target Name (optional):", placeholder="e.g. Full_Address")
+
+        if st.button("🔗 Merge Selected Columns", use_container_width=True):
+            if len(selected_to_merge) < 2:
+                st.warning("Please select at least 2 columns to merge.")
+            else:
+                add_merge_group(selected_to_merge, actual_delimiter, merged_col_name)
+                st.rerun()
+
+    with c2:
+        st.markdown("#### Active Merged Groups (Un-merge)")
+        
+        if not st.session_state["merged_groups"]:
+            st.info("No columns merged yet.")
+        else:
+            for group in st.session_state["merged_groups"]:
+                with st.container(border=True):
+                    g_col1, g_col2 = st.columns([3, 1])
+                    with g_col1:
+                        joined_cols_str = " + ".join([st.session_state["column_renames"].get(c, c) for c in group["cols"]])
+                        delim_display = f"'{group['delimiter']}'" if group['delimiter'] != "" else "None"
+                        st.markdown(f"**Target:** `{group['name']}`")
+                        st.caption(f"**Merging:** {joined_cols_str} | **Delimiter:** {delim_display}")
+                    
+                    with g_col2:
+                        st.button(
+                            "🔓 Un-merge",
+                            key=f"unmerge_{group['id']}",
+                            on_click=remove_merge_group,
+                            args=[group["id"]]
+                        )
+
+    st.divider()
+
+    # --- 4. FINAL TRANSFORMED PREVIEW ---
+    st.subheader("4. Final Transformed Preview")
+
+    transformed_df = pd.DataFrame()
+
+    # 1. First apply renames
+    for c in sample_df.columns:
+        renamed_title = st.session_state["column_renames"].get(c, c)
+        transformed_df[renamed_title] = sample_df[c]
+
+    # 2. Apply Merges
+    for group in st.session_state["merged_groups"]:
+        target_name = group["name"]
+        cols_to_join = group["cols"]
+        delim = group["delimiter"]
+        
+        # Concatenate series
+        joined_series = sample_df[cols_to_join].astype(str).agg(delim.join, axis=1)
+        transformed_df[target_name] = joined_series
+        
+        # Optionally drop original columns that were merged
+        # transformed_df.drop(columns=[st.session_state["column_renames"].get(c, c) for c in cols_to_join], inplace=True)
+
+    st.dataframe(transformed_df, use_container_width=True)
+
+
+
+
+
+
+
+
+
+
+
+
 else:
-    st.info("Waiting for completion of step 2 ...")
+    st.info("Waiting for completion of step 3 ...")
 
-
+if st.session_state["steps"][5]:
+    st.success(f"✓ Step 3 completed. Ready to transfer data onto database.")
     
