@@ -10,6 +10,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.worksheet.cell_range import CellRange
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 def clean_unit(unit: str) -> str:
     # standardizing units
@@ -176,53 +177,50 @@ def full_ctlg_process(list_of_catalogues: list | None, cdtl_prms: dict) -> list[
     return catalogues_data
 
 
-def process_ctlg_files(list_of_catalogues: list[str] | None) -> str | list[Workbook]:
+def process_ctlg_files(list_of_catalogues: list[str] | None) -> list[tuple]:
     if not list_of_catalogues:
-        return "Error: Catalogue list is empty."
-
-    print(f"Loading catalogue data from {list_of_catalogues} ... \n")
+        return []
 
     # Initialize variables
-    workbooks: list[Workbook] = []
+    workbooks: list[tuple] = []
     
     # Load catalogues workbooks into memory
     for cat_path in list_of_catalogues:
         if not os.path.exists(cat_path):
-            print(f"Error: Catalogue file '{cat_path}' not found!")
-            return "Error: Catalogue file not found!"
+            return []
             
-        workbooks.append(openpyxl.load_workbook(cat_path, data_only=True))
+        wbk_and_path: tuple = (openpyxl.load_workbook(cat_path, read_only=True, data_only=True), Path(cat_path))
+        workbooks.append(wbk_and_path)
 
     return workbooks
 
 
 def inspect_sheet(worksheet: Worksheet) -> Worksheet | None:
     if not worksheet or worksheet.sheet_state != 'visible':
-        return
+        return None
     return worksheet
 
 
-def process_workbooks(workbooks: list[Workbook] | None) -> list[Worksheet] | str:
-
+def process_workbooks(workbooks: list[tuple] | None) -> list[dict[str, list[Worksheet]]] | None:
     if not workbooks:
-        return "Error: Workbook is empty."
+        return None
+    
+    sheets_list: list[dict[str, list[Worksheet]]] = [] # intended format: [{"path1": ["sheet1", "sheet2", ...]}, {"path2": ["sheet1", "sheet2", ...]}, ...]
 
-    sheets_list: list[Worksheet] = []
+    for wb, path in workbooks:
+        path_strfd = str(path)
+        lof_on_path = {path_strfd: []} # list of sheets on path
 
-    # 1. Open the thread pool once for the entire workbook processing lifecycle
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        for wb in workbooks:
-            
-            # 2. Map the concurrent worker function over the current workbook's worksheets
-            results = executor.map(lambda s: inspect_sheet(s), wb.worksheets)
-            
-            # 3. Filter Nones for this specific workbook and extend the master list
-            valid_wb_sheets = [s for s in results if s is not None]
-            sheets_list.extend(valid_wb_sheets)
+        for sheet in wb.worksheets:
+            result: Worksheet | None = inspect_sheet(sheet)
+            if result is not None:
+                lof_on_path[path_strfd].append(result)
+        sheets_list.append(lof_on_path)
+
 
     return sheets_list
         
-
+"""
 def get_actual_max_row(sheet: Worksheet) -> int:
     for row_num in range(sheet.max_row, 0, -1):
         if any(cell.value is not None for cell in sheet[row_num]):
@@ -230,35 +228,32 @@ def get_actual_max_row(sheet: Worksheet) -> int:
     return 1
 
 
-def random_3rows(slctd_sheets: list[str]) -> pd.DataFrame:
-    """Extract 3 random rows from selected sheets into a clean Pandas DataFrame."""
+def random_3rows(slctd_sheets: list[dict[str, list[Worksheet]]]) -> pd.DataFrame:
+    # Extract 3 random rows from selected sheets into a clean Pandas DataFrame.
     sp = st.session_state["selected_parameters"]
-    rndm_3sheets = random.choices(slctd_sheets, k=3) if len(slctd_sheets) >= 3 else slctd_sheets
-    
-    rows_data = []
-    print("sheets", slctd_sheets)
-    reconverted_sheets: list[Worksheet] = 
 
+    temp_sheet_list: list[Worksheet] = []
+    for wb_dict in slctd_sheets:
+        for sheetlist in wb_dict.values():
+            temp_sheet_list.extend(sheetlist)
 
-    I need the workbook resp. the file path
+    rndm_3sheets: list[Worksheet] = random.choices(temp_sheet_list, k=3) if len(temp_sheet_list) >= 3 else temp_sheet_list
 
-
-
-    for sheet in reconverted_sheets:
-        rnd_int: int = random.randint(sp["min_row"], get_actual_max_row(sheet))
-        # openpyxl slice returns a tuple of tuples: ((cell1, cell2, ...),)
-        cell_range: tuple = sheet[f"{sp['min_col']}{rnd_int}":f"{sp['max_col']}{rnd_int}"]
-        row_values: list = [cell.value for cell in cell_range[0]]
-        rows_data.append(row_values)
+    rows_data: list[list] = []
+    for sheet in rndm_3sheets:
+        rndm_row = random.randint(sp["min_row"], sheet.max_row)
+        rows_data.append(
+            [row[0].value for row in sheet.iter_rows(min_row=rndm_row, max_row=rndm_row)]
+        )
 
     # Generate default column names (Col A, Col B, etc. or index-based)
-    cols_count = len(rows_data[0]) if rows_data else 0
+    cols_count = sp["max_col"]
     col_names: list[str] = [f"Col{i+1}" for i in range(cols_count)]
     
     return pd.DataFrame(rows_data, columns=col_names)       
     
 
-"""
+
 def process_sheets(sheets: list[Worksheet], cdtl_prms: dict) -> list[dict] | None:
 
     catalogues_data: list[dict] = []
@@ -290,3 +285,54 @@ def process_sheets(sheets: list[Worksheet], cdtl_prms: dict) -> list[dict] | Non
     return        
 
 """
+
+import openpyxl
+import pandas as pd
+from typing import Generator, Any
+
+def process_catalogue_pipeline(file_paths: list[str]) -> Generator[Any, Any, str]:
+    """
+    Single function handling the entire lifecycle.
+    Uses 'yield' to pause execution and wait for user input from Streamlit.
+    """
+    # Load workbooks once — keep them open across yields
+    workbooks = [
+        (openpyxl.load_workbook(fp, read_only=True, data_only=True), fp) 
+        for fp in file_paths
+    ]
+
+    try:
+        # --- STEP 1: Discover Sheets ---
+        found_sheets = {}
+        for wb, path in workbooks:
+            found_sheets[path] = [s.title for s in wb.worksheets]
+
+        # PAUSE 1: Yield discovered sheets to UI, WAIT for user's selection
+        selected_sheet_names = yield {"step": "SELECT_SHEETS", "data": found_sheets}
+
+
+        # --- STEP 2: Sample Rows ---
+        sampled_rows = []
+        for wb, path in workbooks:
+            for sheet in wb.worksheets:
+                if sheet.title in selected_sheet_names:
+                    # Run your sampling logic (e.g., random 3 rows)
+                    # Safe because 'wb' is still open and active!
+                    max_row = sheet.max_row or 100 
+                    sampled_rows.append({"sheet": sheet.title, "max_row": max_row})
+
+        # PAUSE 2: Yield sample data to UI, WAIT for user confirmation
+        user_confirmed = yield {"step": "PREVIEW_DATA", "data": pd.DataFrame(sampled_rows)}
+
+
+        # --- STEP 3: Clone to Database ---
+        if user_confirmed:
+            # Execute your SQL / DB insertion logic here
+            pass
+
+        return "Database migration completed successfully!"
+
+    finally:
+        # GUARANTEED CLEANUP: Always closes zip handles when pipeline finishes or fails
+        for wb, _ in workbooks:
+            wb.close()

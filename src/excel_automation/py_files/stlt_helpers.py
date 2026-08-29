@@ -3,14 +3,13 @@ import uuid
 from pathlib import Path
 from config import XLSX_DIR
 from openpyxl import Workbook
-from src.excel_automation.py_files.process_catalogues import process_ctlg_files, process_workbooks
+from src.excel_automation.py_files.process_catalogues import process_ctlg_files
 
 
-def get_xlsx_files(folder: Path = XLSX_DIR) -> str | list[str]:
+def get_xlsx_files(folder: Path = XLSX_DIR) -> list:
     """Scans the directory for .xlsx files and returns absolute path strings."""
     if not folder.exists():
-        print(f"Folder {folder} does not exist.")
-        return "Folder must exist. Accidently changed path? Check config.py on this root folder (not the config file among main.py)."
+        return []
         #folder.mkdir(parents=True, exist_ok=True)
 
     # Find all .xlsx / .xlsm files (excluding hidden/temp ~$ Excel files)
@@ -21,12 +20,11 @@ def get_xlsx_files(folder: Path = XLSX_DIR) -> str | list[str]:
     ]
     return sorted(files)
 
-@st.cache_data
-def get_cache(ctlg_files: list[str] | None = None) -> list | str | None:
+@st.cache_resource
+def get_cache(ctlg_files: list[str] | None = None) -> list[tuple]:
     if not ctlg_files:
-        return
-    elif ctlg_files:
-        return process_ctlg_files(st.session_state["detected_files"])
+        return []
+    return process_ctlg_files(ctlg_files)
 
 
 def filter_deletion(f_count: int) -> None:

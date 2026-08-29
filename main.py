@@ -4,8 +4,8 @@ import streamlit as st
 import config as cfg
 import pandas as pd
 
-from src.excel_automation.py_files.process_catalogues import process_workbooks, random_3rows
-from src.excel_automation.py_files.stlt_helpers import get_xlsx_files, get_cache, col_to_num, add_filter_callback, delete_filter_callback, add_merge_group, remove_merge_group 
+from src.excel_automation.py_files.process_catalogues import process_workbooks
+from src.excel_automation.py_files.stlt_helpers import get_xlsx_files, get_cache, col_to_num, add_filter_callback, delete_filter_callback
 
 print("Starting Streamlit ... \n")
 
@@ -23,7 +23,7 @@ if "initialized" not in st.session_state:
     st.session_state.update({
         "detected_files": [],
         "workbooks": [],
-        "slctd_sheet_titles": [],
+        "selected_sheets": [],
         "selected_parameters": {
             "min_col": 1, 
             "max_col": None, 
@@ -67,12 +67,12 @@ with col1:
     file_paths_raw = st.text_area(
         f"Edit the lines to add or remove file paths.\nFiles detected in '{cfg.XLSX_DIR}/':",
         value="\n".join(get_xlsx_files(cfg.XLSX_DIR)),
-        height=140,
+        height=140
     )
 
 with col2:
     st.space("small")
-    if st.button("🔄 Refresh Directory", use_container_width=True):
+    if st.button("🔄 Refresh Directory"):
         st.rerun()
 
 # Parse and clean paths from text area
@@ -93,7 +93,7 @@ if file_paths:
         st.session_state["steps"][0] = False
     else:
         # Load workbooks if not already loaded into state
-        if not st.session_state["workbooks"]:
+        if not st.session_state["workbooks"] or len(file_paths) != len(st.session_state["workbooks"]):
             with st.spinner("Processing catalogue file/s ..."):
                 st.session_state["workbooks"] = get_cache(file_paths)
                 
@@ -115,12 +115,18 @@ if st.session_state["steps"][0]:
 
     # 1. Extract sheets from pre-loaded session workbooks
     processed_sheets = process_workbooks(st.session_state["workbooks"])
+    # output: [{"path1": ["sheet1", "sheet2", ...]}, {"path2": ["sheet1", "sheet2", ...]}, ...]
     
+    available_sheet_names = []
     if not processed_sheets:
         st.warning("⚠️ No sheets found in selected workbooks.")
-        available_sheet_names = []
     else:
-        available_sheet_names = [sheet.title for sheet in processed_sheets]
+        for wb_dict in processed_sheets:
+            path, sheetslist = list(wb_dict.items())[0]
+            # print("wb_dict: ", path, sheetslist[0])
+            for sheetslist in wb_dict.values():
+                sheet_names = [sheet.title for sheet in sheetslist]
+                available_sheet_names.extend(sheet_names)
 
     p_col1, p_col2, p_col3, p_col4 = st.columns([2, 1, 1, 1])
 
@@ -138,7 +144,16 @@ if st.session_state["steps"][0]:
             apply_button = st.form_submit_button(label="Apply Filter")
 
             if apply_button:
-                st.session_state["slctd_sheet_titles"] = selected_sheets
+                list_of_dict: list[dict[str, list]] = []
+                if processed_sheets and selected_sheets:
+                    for wb_dict in processed_sheets:
+                        for path, sheetlist in wb_dict.items():
+                            sheets_on_path = [sheet for sheet in sheetlist if sheet.title in selected_sheets]
+                            if sheets_on_path:
+                                wb_dict[path] = sheets_on_path
+                        
+
+                st.session_state["selected_sheets"] = processed_sheets
                 st.session_state["steps"][1] = True
 
         if not st.session_state["steps"][1]:
@@ -242,7 +257,7 @@ if st.session_state["steps"][0]:
             st.divider()
 
             # 3. Apply Button
-            apply_cond_filters = st.button("Apply Conditional Filters", use_container_width=True)
+            apply_cond_filters = st.button("Apply Conditional Filters")
 
             if apply_cond_filters:
                 # Pre-parse inputs upon final submission
@@ -271,131 +286,6 @@ st.divider()
 if st.session_state["steps"][4]:
 
     st.subheader("Step 3: Database Architecture")
-
-    # Mock sample dataframe (representing the output of random_3rows)
-    sample_df: pd.DataFrame = random_3rows(st.session_state["slctd_sheet_titles"])
-
-    # --- 1. SAMPLE ROWS DISPLAY ---
-    st.subheader("1. Sample 3 Rows Preview")
-    st.caption("Representation of 3 random rows picked from your selected worksheet(s):")
-
-    # Display raw sampled data
-    st.dataframe(sample_df, use_container_width=True)
-
-    st.divider()
-
-    # --- 2. CLICK-TO-RENAME COLUMNS ---
-    st.subheader("2. Rename Column Headers")
-    cols = list(sample_df.columns)
-
-    # Render side-by-side rename inputs for each column
-    rename_cols = st.columns(len(cols))
-    for idx, col in enumerate(cols):
-        with rename_cols[idx]:
-            new_name = st.text_input(
-                label=f"Rename `{col}`",
-                value=st.session_state["column_renames"].get(col, col),
-                key=f"rename_{col}"
-            )
-            st.session_state["column_renames"][col] = new_name
-
-    st.divider()
-
-    # --- 3. MERGE / UN-MERGE BLOCK MANAGER ---
-    st.subheader("3. Merge Columns")
-
-    c1, c2 = st.columns([1, 1], gap="large")
-
-    with c1:
-        st.markdown("#### Create New Merged Group")
-        
-        # Available columns to pick from
-        selected_to_merge = st.multiselect(
-            "Select columns you want to merge:",
-            options=cols,
-            format_func=lambda x: f"{x} ({st.session_state['column_renames'].get(x, x)})"
-        )
-
-        delim_choice = st.selectbox(
-            "Select or type delimiter:",
-            options=[" Space ( ' ' )", "Hyphen ( - )", "Underscore ( _ )", "Comma ( , )",  "No Delimiter", "Custom"]
-        )
-        
-        actual_delimiter = ""
-        if delim_choice == " Space ( ' ' )": actual_delimiter = " "
-        elif delim_choice == "Hyphen ( - )": actual_delimiter = "-"
-        elif delim_choice == "Underscore ( _ )": actual_delimiter = "_"
-        elif delim_choice == "Comma ( , )": actual_delimiter = ", "
-        elif delim_choice == "No Delimiter": actual_delimiter = ""
-        elif delim_choice == "Custom":
-            actual_delimiter = st.text_input("Custom Delimiter Symbol:", value="-")
-
-        merged_col_name = st.text_input("Merged Column Target Name (optional):", placeholder="e.g. Full_Address")
-
-        if st.button("🔗 Merge Selected Columns", use_container_width=True):
-            if len(selected_to_merge) < 2:
-                st.warning("Please select at least 2 columns to merge.")
-            else:
-                add_merge_group(selected_to_merge, actual_delimiter, merged_col_name)
-                st.rerun()
-
-    with c2:
-        st.markdown("#### Active Merged Groups (Un-merge)")
-        
-        if not st.session_state["merged_groups"]:
-            st.info("No columns merged yet.")
-        else:
-            for group in st.session_state["merged_groups"]:
-                with st.container(border=True):
-                    g_col1, g_col2 = st.columns([3, 1])
-                    with g_col1:
-                        joined_cols_str = " + ".join([st.session_state["column_renames"].get(c, c) for c in group["cols"]])
-                        delim_display = f"'{group['delimiter']}'" if group['delimiter'] != "" else "None"
-                        st.markdown(f"**Target:** `{group['name']}`")
-                        st.caption(f"**Merging:** {joined_cols_str} | **Delimiter:** {delim_display}")
-                    
-                    with g_col2:
-                        st.button(
-                            "🔓 Un-merge",
-                            key=f"unmerge_{group['id']}",
-                            on_click=remove_merge_group,
-                            args=[group["id"]]
-                        )
-
-    st.divider()
-
-    # --- 4. FINAL TRANSFORMED PREVIEW ---
-    st.subheader("4. Final Transformed Preview")
-
-    transformed_df = pd.DataFrame()
-
-    # 1. First apply renames
-    for c in sample_df.columns:
-        renamed_title = st.session_state["column_renames"].get(c, c)
-        transformed_df[renamed_title] = sample_df[c]
-
-    # 2. Apply Merges
-    for group in st.session_state["merged_groups"]:
-        target_name = group["name"]
-        cols_to_join = group["cols"]
-        delim = group["delimiter"]
-        
-        # Concatenate series
-        joined_series = sample_df[cols_to_join].astype(str).agg(delim.join, axis=1)
-        transformed_df[target_name] = joined_series
-        
-        # Optionally drop original columns that were merged
-        # transformed_df.drop(columns=[st.session_state["column_renames"].get(c, c) for c in cols_to_join], inplace=True)
-
-    st.dataframe(transformed_df, use_container_width=True)
-
-
-
-
-
-
-
-
 
 
 
