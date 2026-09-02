@@ -3,9 +3,10 @@ from pathlib import Path
 import streamlit as st
 import config as cfg
 import pandas as pd
+from itertools import chain
 
-from src.excel_automation.py_files.process_catalogues import process_workbooks
-from src.excel_automation.py_files.stlt_helpers import get_xlsx_files, get_cache, col_to_num, add_filter_callback, delete_filter_callback
+from src.excel_automation.py_files.process_catalogues import process_ctlg_pipeline
+from src.excel_automation.py_files.stlt_helpers import get_xlsx_files, refresh_callback, col_to_num
 
 print("Starting Streamlit ... \n")
 
@@ -17,31 +18,18 @@ st.set_page_config(page_title="Catalogue Matcher", layout="wide")
 
 
 # ==========================================
-# SECTION: STATE INITIALIZATION (RUNS ONCE ONLY)
+# SECTION: SESSION_STATE VISUALIZATION
 # ==========================================
-if "initialized" not in st.session_state:
-    st.session_state.update({
-        "detected_files": [],
-        "workbooks": [],
-        "selected_sheets": [],
-        "selected_parameters": {
-            "min_col": 1, 
-            "max_col": None, 
-            "min_row": 1, 
-            "max_row": None,
-            "filters": []
-        },
-        "indexing_running": False,
-        "steps": [False, False, False, False, False, False],
-        "initialized": True  # Prevents state from resetting on subsequent reruns
-    })
-if "merged_groups" not in st.session_state:
-    st.session_state["merged_groups"] = []  # List of dicts: {"name": str, "cols": list[str], "delimiter": str}
-if "column_renames" not in st.session_state:
-    st.session_state["column_renames"] = {}  # {orig_col: custom_name}
+
+# st.session_state["pipeline"]
+# st.session_state["current_state"]
+if "paths_count" not in st.session_state:
+    st.session_state["paths_count"] = 0
+if "route" not in st.session_state:
+    st.session_state["route"] = [False, False, False, False, False]
 
 
-# # SECTION: INSTRUCTION FOR "FILE PATHS" =========================================
+# SECTION: INSTRUCTION FOR "FILE PATHS" =========================================
 
 
 st.title("📋 Retrieval System on Spreadsheet Files (Excel)")
@@ -53,36 +41,43 @@ st.markdown("""
     - Ready? Continue on here.
 """)
 
-st.divider()
+st.divider() # ----------------------------------------------------------------------------
 
 
-# # SECTION: FILE PATHS ==========================================
+# SECTION: FILE PATHS ==========================================
 
 
 st.subheader("Step 1: File Reader & Paths")
 
 col1, col2 = st.columns([3, 1])
 
+# Initialization on first run
+if "file_paths_raw" not in st.session_state:
+    st.session_state["file_paths_raw"] = "\n".join(get_xlsx_files(cfg.XLSX_DIR))
+
 with col1:
+    # Text area rendered first
     file_paths_raw = st.text_area(
-        f"Edit the lines to add or remove file paths.\nFiles detected in '{cfg.XLSX_DIR}/':",
-        value="\n".join(get_xlsx_files(cfg.XLSX_DIR)),
-        height=140
+        f"Files detected in '{cfg.XLSX_DIR}/':",
+        height=140,
+        key="file_paths_raw",
     )
 
 with col2:
+    #  callback fires BEFORE the page re-renders
     st.space("small")
-    if st.button("🔄 Refresh Directory"):
-        st.rerun()
+    st.button("🔄 Refresh Directory", on_click=refresh_callback)    
 
 # Parse and clean paths from text area
 file_paths: list[str] = [p.strip() for p in file_paths_raw.splitlines() if p.strip()]
 
 # Update Session State
-st.session_state["detected_files"] = file_paths
+if "detected_files" not in st.session_state:
+    st.session_state["detected_files"] = file_paths
 
 # Validation & Processing
-if file_paths:
+if len(file_paths) != st.session_state["paths_count"]:
+    st.session_state["paths_count"] = len(file_paths)
     invalid_files = [
         p for p in file_paths if not p.lower().endswith((".xlsx", ".xlsm"))
     ]
@@ -90,209 +85,142 @@ if file_paths:
         st.warning(
             f"⚠️ Non-supported extensions found: {' -- '.join(invf.split('/')[-1] for invf in invalid_files)}"
         )
-        st.session_state["steps"][0] = False
     else:
-        # Load workbooks if not already loaded into state
-        if not st.session_state["workbooks"] or len(file_paths) != len(st.session_state["workbooks"]):
-            with st.spinner("Processing catalogue file/s ..."):
-                st.session_state["workbooks"] = get_cache(file_paths)
-                
-        st.session_state["steps"][0] = True
-        st.success("✓ Step 1 completed.")
-else:
-    st.info(f"No files found in '{cfg.XLSX_DIR}/'. Copy files there and click Refresh.")
-    st.session_state["steps"][0] = False
+        with st.spinner("Processing catalogue file/s ..."):
+            if "pipeline" in st.session_state:
+                del st.session_state["pipeline"]
+                del st.session_state["current_state"]
+            st.session_state["pipeline"] = process_ctlg_pipeline(file_paths)
+            st.session_state["current_state"] = next(st.session_state["pipeline"])
+            st.session_state["route"][0] = True
+            st.rerun()
 
-st.divider()
+if not st.session_state["detected_files"]:
+    st.info(f"No files found in '{cfg.XLSX_DIR}/'. Copy and paste files there and click Refresh.")
+elif st.session_state["route"][0]:
+    st.success(f"✓ Step 1 completed.")
+else:
+    st.info('Please Ctrl + Enter inside text area when finished selecting file paths.')
+
+
+st.divider() # ----------------------------------------------------------------------------
 
 
 # SECTION EXTRACTION PARAMETERS ==========================================
 
+if "current_state" in st.session_state:
+    state = st.session_state["current_state"]
 
-if st.session_state["steps"][0]:
+    if  st.session_state["route"][0] and not st.session_state["route"][1]:
 
-    st.subheader("Step 2: Extraction Parameters")
+        st.subheader("Step 2: Sheets Filter")
 
-    # 1. Extract sheets from pre-loaded session workbooks
-    processed_sheets = process_workbooks(st.session_state["workbooks"])
-    # output: [{"path1": ["sheet1", "sheet2", ...]}, {"path2": ["sheet1", "sheet2", ...]}, ...]
-    
-    available_sheet_names = []
-    if not processed_sheets:
-        st.warning("⚠️ No sheets found in selected workbooks.")
-    else:
-        for wb_dict in processed_sheets:
-            path, sheetslist = list(wb_dict.items())[0]
-            # print("wb_dict: ", path, sheetslist[0])
-            for sheetslist in wb_dict.values():
-                sheet_names = [sheet.title for sheet in sheetslist]
-                available_sheet_names.extend(sheet_names)
+        upd_sheets_slctn = {}
 
-    p_col1, p_col2, p_col3, p_col4 = st.columns([2, 1, 1, 1])
-
-    with p_col1:
-        st.markdown("**Sheets Filter**")
-        
         with st.form(key="sheets_filter_form"):
-            selected_sheets = st.multiselect(
-                label="Select sheets to process:",
-                options=available_sheet_names,
-                default=available_sheet_names,
-                key="selected_sheets_filter"
-            )
-            
-            apply_button = st.form_submit_button(label="Apply Filter")
+            st.text("Select sheet/s to process:")
 
-            if apply_button:
-                list_of_dict: list[dict[str, list]] = []
-                if processed_sheets and selected_sheets:
-                    for wb_dict in processed_sheets:
-                        for path, sheetlist in wb_dict.items():
-                            sheets_on_path = [sheet for sheet in sheetlist if sheet.title in selected_sheets]
-                            if sheets_on_path:
-                                wb_dict[path] = sheets_on_path
-                        
+            for file_path, sheets in state["data"].items():
+                file_name = Path(file_path).stem
+                widget_key = f"sheet_selector_{file_name}"
+                selected_sheets = st.multiselect(
+                    label=f"File: **{file_name}**",
+                    options=sheets,
+                    default=sheets,
+                    key=widget_key
+                )
+                upd_sheets_slctn[file_path] = selected_sheets 
 
-                st.session_state["selected_sheets"] = processed_sheets
-                st.session_state["steps"][1] = True
+            apply_sht_filter = st.form_submit_button(label="Apply Sheets Filter")
 
-        if not st.session_state["steps"][1]:
-            st.info('Please confirm selection of sheets by clicking on the "Apply Filter" button.')
-        else:
-            st.success("✓")
+        if apply_sht_filter and state["step"] == "SELECT_SHEETS":
+            st.session_state["current_state"] = st.session_state["pipeline"].send(upd_sheets_slctn)
+            st.session_state["route"][1] = True
+            st.rerun()
+        elif state["step"] == "SELECT_SHEETS" and not st.session_state["route"][1]:
+            st.info('Please confirm selection of sheets by clicking on the "Apply Sheets Filter" button.')
 
-    if st.session_state["steps"][1]:
+    elif st.session_state["route"][1]:
+        st.success("✓ Step 2 completed.")
 
-        apply_col_filter = False
-        apply_row_filter = False
-        apply_cond_filters = False
+        st.divider() # ---------------------------------------------------------------------------- 
 
-        with p_col2:
-            st.markdown("**Columns Filter**")
+    if st.session_state["route"][1] and not st.session_state["route"][2]:
 
-            with st.form(key="columns_filter_form"): 
-                st.text("Select column/s to process:")
-                col_from = st.text_input("From cloumn:", "A")
-                col_to = st.text_input("To column (empty for all of them):", "")
+        st.subheader("Step 3: Columns Filter")
 
-                apply_col_filter = st.form_submit_button(label="Apply Columns Filter")
+        with st.form(key="columns_filter_form"): 
+            st.text("Select column/s to process:")
 
-                if apply_col_filter:
-                    st.session_state["selected_parameters"]["min_col"] = col_to_num(col_from)
-                    st.session_state["selected_parameters"]["max_col"] = col_to_num(col_to) if col_to else None
-                    st.session_state["steps"][2] = True
+            upd_payload = {}
 
-            if not st.session_state["steps"][2]:
-                st.info('Please confirm selection of columns.')
-            else:
-                st.success("✓")
+            for path, dict in state["data"].items():
+                upd_payload[path] = {}
+                widget_key = f"columns_selector_{Path(path).stem}"
+                st.caption(f"File: **{Path(path).stem}**")
+                col_from = st.text_input("From cloumn:", placeholder="e.g. B", key=f"{widget_key}-cf")
+                col_to = st.text_input("To column (empty for all of them):", "", key=f"{widget_key}-ct")
+                if col_from or col_to:
+                    upd_payload[path].update({"min_col": col_to_num(col_from), "max_col": col_to_num(col_to) if col_to else None})
+                elif not col_from and not col_to:
+                    upd_payload[path].update({"min_col": 1, "max_col": None})
                 
-        with p_col3:
-            st.markdown("**Rows Filter**")
 
-            with st.form(key="rows_filter_form"):
-                st.text("Select row/s to process:")
-                row_from = st.text_input("From row:", "1")
-                row_to = st.text_input("To row (empty for all of them):", "")
+            apply_col_filter = st.form_submit_button(label="Apply Columns Filter")
 
-                apply_row_filter = st.form_submit_button(label="Apply Rows Filter")
+            if apply_col_filter and state["step"] == "SELECT_COLUMNS":
+                st.session_state["current_state"] = st.session_state["pipeline"].send(upd_payload)
+                st.session_state["route"][2] = True
+                st.rerun()
+            elif state["step"] == "SELECT_COLUMNS" and not st.session_state["route"][2]:
+                st.info('Please confirm selection of columns.')
 
-                if apply_row_filter:
-                    st.session_state["selected_parameters"]["min_row"] = int(row_from)
-                    st.session_state["selected_parameters"]["max_row"] = int(row_to) if row_to else None
-                    st.session_state["steps"][3] = True
+    elif st.session_state["route"][2]:
+        st.success("✓ Step 3 completed.")
 
-            if not st.session_state["steps"][3]:
+        st.divider() # ----------------------------------------------------------------------------
+
+    if st.session_state["route"][2] and not st.session_state["route"][3]:
+
+        st.subheader("Step 4: Rows Filter")
+
+        with st.form(key="rows_filter_form"): 
+            st.text("Select row/s to process:")
+
+            upd_payload = {}
+
+            for path, dict in state["data"].items():
+                upd_payload[path] = {}
+                widget_key = f"rows_selector_{Path(path).stem}"
+                st.caption(f"File: **{Path(path).stem}**")
+                row_from = st.text_input("From row:", placeholder="e.g. 2", key=f"{widget_key}-rf")
+                row_to = st.text_input("To row (empty for all of them):", "", key=f"{widget_key}-rt")
+                if row_from or row_to:
+                    upd_payload[path].update({"min_row": int(row_from), "max_row": int(row_to) if row_to else None})
+                elif not row_from and not row_to:
+                    upd_payload[path].update({"min_row": 1, "max_row": None})
+
+            apply_row_filter = st.form_submit_button(label="Apply Rows Filter")
+
+            if apply_row_filter and state["step"] == "SELECT_ROWS":
+                st.session_state["current_state"] = st.session_state["pipeline"].send(upd_payload)
+                st.session_state["route"][3] = True
+                st.rerun()    
+            elif state["step"] == "SELECT_ROWS" and not st.session_state["route"][3]:
                 st.info('Please confirm selection of rows.')
-            else:
-                st.success("✓")
 
-        with p_col4:
-            st.markdown("**Additional Filters**")
-            st.info("Any empty rows are automatically omitted (including those with accidental whitespaces).")
+    elif st.session_state["route"][3]:
+        st.success("✓ Step 4 completed.")
 
-            # 1. Render existing filter forms dynamically inside p_col4
-            filters = st.session_state["selected_parameters"]["filters"]
-
-            for idx, f in enumerate(filters):
-                with st.container(border=True):
-                    st.caption(f"Filter #{idx + 1}")
-                    
-                    # Read and bind inputs using unique state keys
-                    f["targ_col_raw"] = st.text_input(
-                        label="Omit row when in column (leave empty for all):",
-                        value=f.get("targ_col_raw", ""),
-                        placeholder="e.g.: B",
-                        key=f"targ_col_{f['id']}"
-                    )
-                    
-                    f["omit_row_when"] = st.text_input(
-                        label="the cell has (leave empty for empty cell):",
-                        value=f.get("omit_row_when", ""),
-                        placeholder="e.g.: Sidenote",
-                        key=f"omit_when_{f['id']}",
-                        help="* for anything not empty; for more words (or anything) separate them by ,/comma or ;/semicolon;"
-                    )
-
-                    # Validation message directly under the inputs
-                    if not f["targ_col_raw"] and not f["omit_row_when"]:
-                        st.warning("Enter at least one input.", icon="⚠️")
-
-                    # Delete button with clean callback passing index
-                    st.button(
-                        "Delete filter",
-                        key=f"del_{f['id']}",
-                        use_container_width=True,
-                        on_click=delete_filter_callback,
-                        args=[f["id"]]
-                    )
-
-            # 2. Add Filter Button (Triggers pure state update via callback)
-            st.button(
-                "➕ Add a filter",
-                use_container_width=True,
-                on_click=add_filter_callback
-            )
-
-            st.divider()
-
-            # 3. Apply Button
-            apply_cond_filters = st.button("Apply Conditional Filters")
-
-            if apply_cond_filters:
-                # Pre-parse inputs upon final submission
-                for f in filters:
-                    f["parsed_tCol"] = col_to_num(f["targ_col_raw"])
-                    
-                st.session_state["steps"][4] = True  # Assuming 0-indexed step 4
-
-            if st.session_state["steps"][4]:
-                st.success("✓")
-            else:
-                st.info("Please confirm selection of conditional filters.")
-
-else:
-    st.info("Waiting for completion of step 1 ...")
-
-if st.session_state["steps"][1] and st.session_state["steps"][2] and st.session_state["steps"][3] and st.session_state["steps"][4]:    
-    st.success(f"✓ Step 2 completed. Ready for data extraction.")
+        st.divider() # ----------------------------------------------------------------------------
 
 
-# SECTION: DATABASE STRUCTURIZING ==========================================
+    if st.session_state["route"][3] and not st.session_state["route"][4]:
 
+        st.subheader("Step 4: Additional Filters")
 
-st.divider()
+        with st.form(key="addtl_filter_form"):
+            st.text("Compose additional filters:")
 
-if st.session_state["steps"][4]:
-
-    st.subheader("Step 3: Database Architecture")
-
-
-
-
-else:
-    st.info("Waiting for completion of step 3 ...")
-
-if st.session_state["steps"][5]:
-    st.success(f"✓ Step 3 completed. Ready to transfer data onto database.")
-    
+    elif st.session_state["route"][3]:
+        st.success("✓ Step 4 completed.")

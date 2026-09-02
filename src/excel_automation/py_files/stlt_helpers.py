@@ -1,12 +1,12 @@
 import streamlit as st
 import uuid
+import config as cfg
 from pathlib import Path
-from config import XLSX_DIR
 from openpyxl import Workbook
 from src.excel_automation.py_files.process_catalogues import process_ctlg_files
 
 
-def get_xlsx_files(folder: Path = XLSX_DIR) -> list:
+def get_xlsx_files(folder: Path = cfg.XLSX_DIR) -> list:
     """Scans the directory for .xlsx files and returns absolute path strings."""
     if not folder.exists():
         return []
@@ -19,6 +19,11 @@ def get_xlsx_files(folder: Path = XLSX_DIR) -> list:
         if not f.name.startswith("~$")
     ]
     return sorted(files)
+
+
+def refresh_callback() -> None:
+    fresh_files = get_xlsx_files(cfg.XLSX_DIR)
+    st.session_state["file_paths_raw"] = "\n".join(fresh_files)
 
 @st.cache_resource
 def get_cache(ctlg_files: list[str] | None = None) -> list[tuple]:

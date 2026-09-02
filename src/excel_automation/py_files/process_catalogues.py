@@ -5,6 +5,7 @@ import re
 import config as cfg
 import streamlit as st
 import pandas as pd
+from src.excel_automation.py_files.db_related import insert_catalogue_rows
 from openpyxl import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.worksheet.cell_range import CellRange
@@ -34,7 +35,7 @@ def clean_description(description: str) -> str:
         #print(f"Loaded: \n {cat_path} \n")
 
 
-def process_catalogues(list_of_catalogues: list | None, db_path: Path | str | None = cfg.DB_PATH) -> list[dict] | None:
+def process_catalogues(list_of_catalogues: list | None, db_path: Path | str | None = cfg.DB_PATH) -> None:
 
     if not list_of_catalogues or db_path is None:
         print("Error: list_of_catalogues and/or db_path is None")
@@ -56,6 +57,9 @@ def process_catalogues(list_of_catalogues: list | None, db_path: Path | str | No
 
         for sheet in wb_cat.worksheets:
             #print(f"\n Processing sheet: {sheet.title}")
+
+            sheetslist = ["Subcontratos", "Catalogo General"]
+            if not sheet.title.isdigit() and sheet.title not in sheetslist: continue 
 
             # Ignores hidden or leftover sheets
             if sheet.sheet_state != 'visible': continue
@@ -120,14 +124,14 @@ def process_catalogues(list_of_catalogues: list | None, db_path: Path | str | No
                 })
 
     # Save data to database
-    #insert_catalogue_rows(catalogues_data)
+    insert_catalogue_rows(catalogues_data, ["clave", "text", "unidad", "hoja", "cell_ref", "file"])
 
     # Print paremeter results
     #print(f"Loaded {len(catalogues_data)} catalogue entries. \n\n")
     #print(f"Random Catalogue entry: {catalogues_data[random.randint(0, len(catalogues_data)-1)]}. \n\n")
     #print(f"Control set: {control_set}")
 
-    return catalogues_data
+    return
 
 
 def full_ctlg_process(list_of_catalogues: list | None, cdtl_prms: dict) -> list[dict] | None:
@@ -290,7 +294,7 @@ import openpyxl
 import pandas as pd
 from typing import Generator, Any
 
-def process_catalogue_pipeline(file_paths: list[str]) -> Generator[Any, Any, str]:
+def process_ctlg_pipeline(file_paths: list[str]) -> Generator[Any, Any, str]:
     """
     Single function handling the entire lifecycle.
     Uses 'yield' to pause execution and wait for user input from Streamlit.
@@ -301,28 +305,55 @@ def process_catalogue_pipeline(file_paths: list[str]) -> Generator[Any, Any, str
         for fp in file_paths
     ]
 
+    """
+    Template:
+    cData = {
+        "PATH1": {
+            "selected_sheets": ["Sheet1", "Sheet2", ...],
+            "min_col": 1,
+            "max_col": None,
+            "min_row": 1,
+            "max_row": None,
+            "filters": []
+        },
+        "PATH2": {
+            ...
+        },
+        ...
+    }
+    """
+    cData = {}
+
     try:
-        # --- STEP 1: Discover Sheets ---
-        found_sheets = {}
+        # --- Discover Sheets ---
+        found_sheets = {}    
         for wb, path in workbooks:
             found_sheets[path] = [s.title for s in wb.worksheets]
+            cData[path] = {}
 
         # PAUSE 1: Yield discovered sheets to UI, WAIT for user's selection
-        selected_sheet_names = yield {"step": "SELECT_SHEETS", "data": found_sheets}
+        selected_sheets = yield {"step": "SELECT_SHEETS", "data": found_sheets}
 
+        # --- Use of filters ---
+        payload = {}
+        for path, sheets in selected_sheets.items():
+            cData[path]["selected_sheets"] = sheets
+            payload[path] = {}
+    
+        slctd_col_filters = yield {"step": "SELECT_COLUMNS", "data": payload}
+        for path in slctd_col_filters:
+            cData[path].update(slctd_col_filters[path])
+        slctd_row_filters = yield {"step": "SELECT_ROWS", "data": payload}
+        for path in slctd_row_filters:
+            cData[path].update(slctd_row_filters[path])
+        addtl_filters = yield {"step": "SELECT_ADDTL_FILTERS", "data": payload}
+        for path in addtl_filters:
+            cData[path].update(addtl_filters[path])
 
-        # --- STEP 2: Sample Rows ---
-        sampled_rows = []
-        for wb, path in workbooks:
-            for sheet in wb.worksheets:
-                if sheet.title in selected_sheet_names:
-                    # Run your sampling logic (e.g., random 3 rows)
-                    # Safe because 'wb' is still open and active!
-                    max_row = sheet.max_row or 100 
-                    sampled_rows.append({"sheet": sheet.title, "max_row": max_row})
+        print("cData:\n", cData)
 
         # PAUSE 2: Yield sample data to UI, WAIT for user confirmation
-        user_confirmed = yield {"step": "PREVIEW_DATA", "data": pd.DataFrame(sampled_rows)}
+        user_confirmed = yield {"step": "PREVIEW_DATA", "data": pd.DataFrame()}
 
 
         # --- STEP 3: Clone to Database ---

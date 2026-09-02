@@ -10,3 +10,6 @@ z_*
 config.*
 .venv/
 .vscode/
+*.py_Odette
+direct/
+*copy.py

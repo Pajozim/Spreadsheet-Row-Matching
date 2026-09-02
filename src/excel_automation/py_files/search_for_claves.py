@@ -2,9 +2,10 @@
 import os
 import openpyxl
 import re
+import unicodedata
+import config as cfg
 from pyxlsb import open_workbook as open_xlsb
 from pathlib import Path
-from config import SOURCE_FILE, OUTPUT_FILE, SF_DIR
 from excel_automation.py_files.db_related import keyword_search
 from excel_automation.py_files.process_catalogues import clean_unit
 
@@ -50,64 +51,63 @@ def process_sheets(wb: openpyxl.Workbook, wb_op: openpyxl.Workbook):
 
         # to focus the search under headers
         context = []
+        activity = []
+        details = []
 
-        for row in sheet.iter_rows(min_row=SF_DIR["MIN_ROW"], min_col=SF_DIR["MIN_COLUMN"], max_col=SF_DIR["MAX_COLUMN"]):
+        for row in sheet.iter_rows(min_row=3, min_col=1, max_col=13):
+
+            if any(not cell for cell in row): continue
+
+            #if any(getattr(cell, "is_merged", True) for cell in row):
+
+            #else:
 
             # setting indexes
-            helper1_idx = SF_DIR["HELPER_COLUMN_1"] - SF_DIR["MIN_COLUMN"]
-            description_idx = SF_DIR["DESCRIPTION_COLUMN"] - SF_DIR["MIN_COLUMN"]
-            unit_idx = SF_DIR["UNIT_COLUMN"] - SF_DIR["MIN_COLUMN"]
+            partida_idx = 0
+            helper1_idx = 10
+            description_idx = 11
+            unit_idx = 12
 
             # setting values
+            pre_partida = row[partida_idx].value
             pre_helper1 = row[helper1_idx].value
             pre_description = row[description_idx].value
             pre_unit = row[unit_idx].value
 
             # Safe extraction + stripping whitespace
+            partida = str(pre_partida).strip() if pre_partida is not None else ""
             helper1 = str(pre_helper1).strip() if pre_helper1 is not None else "" # helper for conditions
             #helper2 = str(row[2].value).strip() if row[2].value is not None else "" # helper for conditions
             description = str(pre_description).strip() if pre_description is not None else "" # description
             unit = str(pre_unit).strip() if pre_unit is not None else "" # unit column
 
             # Set context
-            #if helper2 == "No." or not helper2 and row[3].value:
-            if helper1.isdigit():
+            if helper1 and description and not unit:
                 # specific context (partida/concepto)
-                cleaned_concept = re.findall(r'\w+', description)
-                trimmed_concept = " OR ".join([word.lower() + "*" for word in cleaned_concept if len(word) >= 3])
-
-                # the sheet title, or more exact: disciplina
-                # base_sheet = sheet.title.lower()
-                # cleaned_sheet = re.findall(r'\w+', base_sheet)
-                # trimmed_sheet = " OR ".join([word.lower() + "*" for word in cleaned_sheet if len(word) >= 3]) 
+                cleaned_context: list = re.findall(r'\w+', description)
+                deaccented_context: list = [unicodedata.normalize("NFD", str(cc)).encode("ascii", "ignore").decode("utf-8") for cc in cleaned_context]
+                only_3ormore: list = [cc for cc in deaccented_context if len(cc) >= 3]
+                #trimmed_concept = " OR ".join([word.lower() + "*" for word in cleaned_concept if len(word) >= 3])
 
                 # context packed
-                context = [trimmed_concept]
-                continue
-
-            """
-            # Clear skip condition:
-            # 1. Column 0 is empty
-            # 2. Column 0 equals "Plano"
-            # 3. Column 3 is empty
-            if not helper1 or helper1 == "Plano" or not description or row[0].row is None:
-                # print("Skipping row:", row[0].row, "Val:", repr(row[0].value))
-                continue
-            """
+                for c in only_3ormore:
+                    key = c.lower()
+                    val = cfg.CONTEXT_ABB.get(key, f"{key}*")
+                    context.append(val)
 
             if not description: continue
 
             kws: list[str] = extract_keywords(description)
             #print("kws:", kws)
 
-            matches: list[dict] = keyword_search(kws, clean_unit(unit), context)
+            matches: list[dict] = keyword_search(kws, clean_unit(unit), partida, context)
             print(f"matches: {matches}")
 
             row_number: int = row[0].row # type: ignore
-            if matches: insert_matches(matches, wb_op, sheet.title, SF_DIR["COLUMN_TO_INSERT"], row_number)
+            if matches: insert_matches(matches, wb_op, sheet.title, 15, row_number)
 
 
-def process_source_file(file_path: Path | str = SOURCE_FILE, output_path: Path | str = OUTPUT_FILE) -> None:
+def process_source_file(file_path: Path | str = cfg.SOURCE_FILE, output_path: Path | str = cfg.OUTPUT_FILE) -> None:
 
     if not file_path or not os.path.exists(file_path):
         print("Error: No file path provided / file not found.")
