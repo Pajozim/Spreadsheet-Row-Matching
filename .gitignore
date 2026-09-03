@@ -3,7 +3,6 @@ __pycache__/
 *.code-workspace
 *.xls*
 get-pip.py
-Nuevo documento de texto.txt
 .env
 *.db
 z_*
@@ -13,3 +12,5 @@ config.*
 *.py_Odette
 direct/
 *copy.py
+*_BU
+*.txt

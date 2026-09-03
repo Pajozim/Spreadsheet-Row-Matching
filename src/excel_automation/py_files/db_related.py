@@ -16,7 +16,8 @@ def clean_db() -> None:
     cursor = conn.cursor()
     cursor.execute("DROP TABLE IF EXISTS catalogue_items;")
     cursor.execute("DROP TABLE IF EXISTS catalogue_fts;")
-    # INDEXES
+    cursor.execute("DROP INDEX IF EXISTS idx_clave;")
+    cursor.execute("VACUUM;")
     conn.commit()
     conn.close()
     return
