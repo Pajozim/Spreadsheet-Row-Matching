@@ -14,13 +14,33 @@ def get_db_connection() -> sqlite3.Connection:
 def clean_db() -> None:
     conn = get_db_connection()
     cursor = conn.cursor()
+
+    # 1. Dynamically find all user-created B-Tree indexes
+    cursor.execute("""
+        SELECT name FROM sqlite_master 
+        WHERE type = 'index' 
+          AND name NOT LIKE 'sqlite_%';
+    """)
+    indexes = cursor.fetchall()
+
+    # 2. Drop each index dynamically
+    for (idx_name,) in indexes:
+        cursor.execute(f'DROP INDEX IF EXISTS "{idx_name}";')
+
+    # 3. Drop base and virtual tables
     cursor.execute("DROP TABLE IF EXISTS catalogue_items;")
     cursor.execute("DROP TABLE IF EXISTS catalogue_fts;")
-    cursor.execute("DROP INDEX IF EXISTS idx_clave;")
-    cursor.execute("VACUUM;")
+
+    # 4. Commit drops BEFORE calling VACUUM
     conn.commit()
+
+    # 5. VACUUM in autocommit mode to recover disk space
+    conn.isolation_level = None
+    cursor.execute("VACUUM;")
+    conn.isolation_level = "DEFERRED"
+
     conn.close()
-    return
+    print("Database cleaned successfully.")
 
 
 def create_optimized_indexes(table_name: str, sample_rows: list[dict]):
@@ -51,60 +71,82 @@ def create_optimized_indexes(table_name: str, sample_rows: list[dict]):
     conn.commit()
 
 
-def init_db(ctlg_data: list[dict], drop_tables: bool = False) -> None:
+def init_db(cat_list: list[dict], addtnl_list: dict | None = None, drop_tables: bool = True) -> None:
+    if addtnl_list is None:
+        addtnl_list = {}
+
     conn = get_db_connection()
     cursor = conn.cursor()
 
     if drop_tables:
         clean_db()
 
-    # STEP 1: Analyze sample rows in memory (using up to 100 extracted rows)
-    sample_size = min(len(ctlg_data), 100)
-    samples = ctlg_data[:sample_size]
+    # 1. Base Table
+    joined_catgrs = " TEXT, ".join(cat["name"] for cat in cat_list)
+    query = f"""
+        CREATE TABLE IF NOT EXISTS catalogue_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            {joined_catgrs},
+            sheets TEXT,
+            cell_ref TEXT
+        );"""
+    cursor.execute(query)
 
-    col_avg_lengths = {}
-    for col in ctlg_data[0].keys():
-        total_len = sum(len(str(row.get(col, ""))) for row in samples)
-        col_avg_lengths[col] = total_len / max(sample_size, 1)
+    # 2. B-Tree Indexes (Dynamic Index Names)
+    index_cols = addtnl_list.get("index", [])
+    for item in index_cols:
+        print("item ante: ", item)
+        clean_item = item.strip("[]`\"'")
+        print("item post: ", item)
+        # Generate a unique index name per column
+        query = f"CREATE INDEX IF NOT EXISTS idx_{clean_item} ON catalogue_items({item});"
+        cursor.execute(query)
 
-    # Classify columns dynamically
-    short_cols = [col for col, avg in col_avg_lengths.items() if avg < 30]
-    long_cols = [col for col, avg in col_avg_lengths.items() if avg >= 30]
-
-    # STEP 2: Create base SQLite table
-    cols_sql = ", ".join([f"{col} TEXT" for idx, col in enumerate(short_cols + long_cols)])
-    cursor.execute(f"CREATE TABLE IF NOT EXISTS catalogue_items (id INTEGER PRIMARY KEY AUTOINCREMENT, {cols_sql});")
-
-    # STEP 3: Bulk insert extracted rows
-    #col_names = ", ".join(columns)
-    #placeholders = ", ".join([f":{col}" for col in columns])
-    
-    cursor.execute("BEGIN TRANSACTION;")
-    #cursor.executemany(f"INSERT INTO catalogue_items ({col_names}) VALUES ({placeholders})", extracted_rows)
-    conn.commit()
-
-    # STEP 4: Build standard indexes on short filter columns
-    for col in short_cols:
-        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{col} ON catalogue_items({col});")
-
-    # STEP 5: Build FTS5 index on long text columns (descriptions)
-    if long_cols:
-        fts_cols = ", ".join(long_cols)
-        cursor.execute(f"""
+    # 3. FTS5 Table & Triggers
+    fts5_cols = addtnl_list.get("fts5", [])
+    if fts5_cols:
+        joined_fts5cats = ", ".join(fts5_cols)
+        query = f"""
             CREATE VIRTUAL TABLE IF NOT EXISTS catalogue_fts USING fts5(
-                {fts_cols},
+                {joined_fts5cats},
                 content='catalogue_items',
                 content_rowid='id',
                 tokenize='unicode61 remove_diacritics 1'
             );
-        """)
-        cursor.execute(f"""
-            INSERT INTO catalogue_fts(rowid, {fts_cols})
-            SELECT id, {fts_cols} FROM catalogue_items;
-        """)
+        """
+        cursor.execute(query)
 
+        # Dynamic Column Formatting for Triggers
+        new_cols = ", ".join([f"new.{col}" for col in fts5_cols])
+        old_cols = ", ".join([f"old.{col}" for col in fts5_cols])
+
+        # Separate statements executed cleanly via executescript
+        triggers_script = f"""
+            CREATE TRIGGER IF NOT EXISTS catalogue_ai AFTER INSERT ON catalogue_items BEGIN
+                INSERT INTO catalogue_fts(rowid, {joined_fts5cats}) VALUES (new.id, {new_cols});
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS catalogue_ad AFTER DELETE ON catalogue_items BEGIN
+                INSERT INTO catalogue_fts(catalogue_fts, rowid, {joined_fts5cats}) VALUES('delete', old.id, {old_cols});
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS catalogue_au AFTER UPDATE ON catalogue_items BEGIN
+                INSERT INTO catalogue_fts(catalogue_fts, rowid, {joined_fts5cats}) VALUES('delete', old.id, {old_cols});
+                INSERT INTO catalogue_fts(rowid, {joined_fts5cats}) VALUES (new.id, {new_cols});
+            END;
+        """
+        cursor.executescript(triggers_script)
+
+    # 4. Commit Schema Changes
     conn.commit()
-    print("Database built, inserted, and indexed successfully at: ", cfg.DB_PATH)
+
+    # 5. VACUUM in Autocommit Mode
+    conn.isolation_level = None
+    cursor.execute("VACUUM;")
+    conn.isolation_level = "DEFERRED"
+
+    conn.close()
+    print("Database initiated successfully.")
 
 
 def insert_catalogue_rows(rows: list[dict], columns: list[str]):
@@ -120,8 +162,8 @@ def insert_catalogue_rows(rows: list[dict], columns: list[str]):
 
     # 3. Construct the final query
     query = f"""
-        INSERT INTO catalogue_items ({cols_sql}, cell_reference)
-        VALUES ({placeholders_sql}, :cell_reference)
+        INSERT INTO catalogue_items ({cols_sql}, sheets, cell_ref)
+        VALUES ({placeholders_sql}, :sheets, :cell_ref)
     """
 
     # 4. Execute using the dictionary keys matching the placeholders
@@ -312,7 +354,7 @@ def show_db(fts: bool = False):
     if fts:
         cursor.execute("SELECT * FROM catalogue_fts")
     else:
-        cursor.execute("SELECT * FROM catalogue_items WHERE sheet IS NOT 'subcontratos'")
+        cursor.execute("SELECT * FROM catalogue_items LIMIT 20")
     rows = cursor.fetchall()
     for row in rows:
         print(row)
