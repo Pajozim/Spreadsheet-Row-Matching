@@ -95,9 +95,7 @@ def init_db(cat_list: list[dict], addtnl_list: dict | None = None, drop_tables: 
     # 2. B-Tree Indexes (Dynamic Index Names)
     index_cols = addtnl_list.get("index", [])
     for item in index_cols:
-        print("item ante: ", item)
         clean_item = item.strip("[]`\"'")
-        print("item post: ", item)
         # Generate a unique index name per column
         query = f"CREATE INDEX IF NOT EXISTS idx_{clean_item} ON catalogue_items({item});"
         cursor.execute(query)
@@ -149,21 +147,33 @@ def init_db(cat_list: list[dict], addtnl_list: dict | None = None, drop_tables: 
     print("Database initiated successfully.")
 
 
-def insert_catalogue_rows(rows: list[dict], columns: list[str]):
+def get_db_columns(table_name: str = "catalogue_items") -> list[str]:
+    """Return column names and data types for a given table."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    table_info = cursor.fetchall()
+    conn.close()
+    return [ti[1] for ti in table_info] if table_info else []
+
+
+def insert_catalogue_rows(rows: list[dict], columns: list[dict]) -> bool:
     """Bulk insert parsed catalogue rows into SQLite."""
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # 1. Join column names (e.g., "name, price, stock")
-    cols_sql = ", ".join(columns)
+    col_names = [col["name"] for col in columns]
 
-    # 2. Generate matching placeholders (e.g., ":name, :price, :stock")
-    placeholders_sql = ", ".join([f":{col}" for col in columns])
+    # 1. Join column names (e.g., "name, price, stock")
+    cols_sql = ", ".join(col_names)
+
+    # 2. Generate matching corresponding placeholders (e.g., ":name, :price, :stock")
+    values_sql = ", ".join(f":{col_name}" for col_name in col_names)
 
     # 3. Construct the final query
     query = f"""
         INSERT INTO catalogue_items ({cols_sql}, sheets, cell_ref)
-        VALUES ({placeholders_sql}, :sheets, :cell_ref)
+        VALUES ({values_sql}, :sheets, :cell_ref)
     """
 
     # 4. Execute using the dictionary keys matching the placeholders
@@ -171,7 +181,10 @@ def insert_catalogue_rows(rows: list[dict], columns: list[str]):
 
     conn.commit()
     conn.close()
+    
     print(f"Successfully inserted {len(rows)} items into database.")
+
+    return True
 
 
 def parse_clave_to_sheet(clave: str) -> str:
@@ -348,7 +361,7 @@ def keyword_search(keywords: list[str], unit: str, context: list[str], max_resul
     return results
 
 
-def show_db(fts: bool = False):
+def show_db(fts: bool = False) -> list:
     conn = sqlite3.connect(cfg.DB_PATH)
     cursor = conn.cursor()
     if fts:
@@ -356,8 +369,8 @@ def show_db(fts: bool = False):
     else:
         cursor.execute("SELECT * FROM catalogue_items LIMIT 20")
     rows = cursor.fetchall()
-    for row in rows:
-        print(row)
+    #for row in rows: print(row)
     conn.close()
+    return rows
 
     

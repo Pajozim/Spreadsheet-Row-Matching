@@ -1,9 +1,12 @@
 import streamlit as st
 import config as cfg
+import pandas as pd
+
+from io import StringIO
 from pathlib import Path
-from src.excel_automation.py_files.process_catalogues import extract_sheets, process_spdsht_files
-from src.excel_automation.py_files.db_related import init_db
-from src.excel_automation.py_files.stlt_helpers import get_xlsx_files, refresh_callback, col_to_num, add_filter_callback, delete_filter_callback, add_category_callback, delete_category_callback, get_last_column, get_letters
+from src.excel_automation.py_files.process_files import process_spreadsheet_files
+from src.excel_automation.py_files.db_related import init_db, get_db_columns, show_db
+from src.excel_automation.py_files.stlt_helpers import get_xlsx_files, refresh_callback, add_filter_callback, delete_filter_callback, add_category_callback, delete_category_callback, get_last_column, get_letters, list_sheets
 
 
 print("Starting Streamlit ... \n")
@@ -19,110 +22,133 @@ st.set_page_config(page_title="Catalogue Matcher", layout="wide")
 # SECTION: SESSION_STATE VISUALIZATION
 # ==========================================
 
-if "parameters" not in st.session_state:
-    st.session_state["parameters"] = {}
+if "c-parameters" not in st.session_state:
+    st.session_state["c-parameters"] = {}
+if "s-parameters" not in st.session_state:
+    st.session_state["s-parameters"] = {}
 if "paths_count" not in st.session_state:
     st.session_state["paths_count"] = 0
 if "route" not in st.session_state:
-    st.session_state["route"] = [False, False, False, False, False, False, False]
+    st.session_state["route"] = [False, False, False, False, False, False, False, False, False] # current length: 9
 
 
-# SECTION: INSTRUCTION FOR "FILE PATHS" =========================================
+# SECTION: ACTION MENU ==================================================================
 
+st.title("📋 Retrieval System from Spreadsheet Files (Excel)")
 
-st.title("📋 Retrieval System on Spreadsheet Files (Excel)")
+col1, col2 = st.columns([1, 3])
 
-st.subheader("Instructions before Usage")
-st.markdown("""
-    - Go from your "root folder" (where you opened this app) to `src/excel_automation/xlsx_files/` folder 
-    - Copy & Paste (or drag) your cataloguing/lookup files and your search-consulting file to the `xlsx_files/` folder.
-    - Ready? Continue on here.
-""")
+active_key = "c-parameters" 
+cur_prmtrs = None
 
-st.divider() # ----------------------------------------------------------------------------
-
-
-# SECTION: FILE PATHS ==========================================
-
-
-st.subheader("Step 1: File Reader & Paths")
-st.caption("""Select the spreadsheet files whose data will serve as the search database (data you are inserting INTO the database).
-⚠️ Do not select the Excel/spreadsheet files you are reading FROM, whose read data is to be searched on the database. 
-If still unclear, please consult README.md.""")
-
-col1, col2 = st.columns([3, 1])
-
-# Initialization on first run
-if "file_paths_raw" not in st.session_state:
-    st.session_state["file_paths_raw"] = "\n".join(get_xlsx_files(cfg.XLSX_DIR))
-
-with col1:
-    # Text area rendered first
-    file_paths_raw = st.text_area(
-        f"Files detected in '{cfg.XLSX_DIR}/':",
-        height=140,
-        key="file_paths_raw",
-    )
-
-with col2:
-    #  callback fires BEFORE the page re-renders
-    st.space("small")
-    st.button("🔄 Refresh Directory", on_click=refresh_callback)    
-
-# Parse and clean paths from text area
-file_paths: list[str] = [p.strip() for p in file_paths_raw.splitlines() if p.strip()]
-
-# Update Session State
-if "detected_files" not in st.session_state:
-    st.session_state["detected_files"] = file_paths
-
-# Validation & Processing
-if len(file_paths) != st.session_state["paths_count"]:
-    st.session_state["paths_count"] = len(file_paths)
-    invalid_files = [
-        p for p in file_paths if not p.lower().endswith((".xlsx", ".xlsm"))
-    ]
-    if invalid_files:
-        st.warning(
-            f"⚠️ Non-supported extensions found: {' -- '.join(invf.split('/')[-1] for invf in invalid_files)}"
-        )
-    else:
-        with st.spinner("Processing catalogue file/s ..."):
-            for file_path in file_paths:
-                st.session_state["parameters"][file_path] = {
-                    "selected_sheets": [],
-                    "min_row": 1,
-                    "max_row": None,
-                    "min_col": 1,
-                    "max_col": None,
-                    "filters": [],
-
-                }
-            extract_sheets()
+with st.container(horizontal=True, vertical_alignment="top"):
+    with col1:
+        st.write("Add data or intialize the database for the Catalogue Matcher?")
+        action = st.menu_button("Which action?", ["Create, update or add more data to the database", "Search on the database"])
+        if action == "Create, update or add more data to the database":
             st.session_state["route"][0] = True
-            st.rerun()
+        elif action == "Search on the database":
+            st.session_state["route"][7] = True
+            active_key = "s-parameters"
+        cur_prmtrs = st.session_state[active_key]
 
-if not st.session_state["detected_files"]:
-    st.info(f"No files found in '{cfg.XLSX_DIR}/'. Copy and paste files there and click Refresh.")
-elif st.session_state["route"][0]:
-    st.success(f"✓")
-else:
-    st.info('Please Ctrl + Enter inside text area when finished selecting file paths.')
+    with col2:
+        st.caption("Database preview:")
+        st.write(pd.DataFrame(show_db()[:5], columns=get_db_columns()))
 
+# SECTION: SHARED PARAMETER SELECTION ===================================================
 
-st.divider() # ----------------------------------------------------------------------------
+if st.session_state["route"][0]: # files paths
 
+    st.divider() # ----------------------------------------------------------------------------
 
-# SECTION EXTRACTION PARAMETERS ==========================================
+    st.subheader("Instructions before Usage")
+    st.markdown("""
+        - Go from your "root folder" (where you opened this app) to `src/excel_automation/xlsx_files/` folder.
+        - Copy & Paste (or drag after duplicating) your cataloguing/lookup files AND search-consulting files to the `xlsx_files/` folder.
+        - Ready? Continue on here.
+    """)
 
-if st.session_state["route"][0]:
+    # SECTION: FILE PATHS ==========================================
+
+    st.subheader("Step 1: File Reader & Paths")
+    if active_key == "c-parameters":
+         st.caption("""Select the spreadsheet files whose data will serve as the search database (data you are inserting INTO the database).
+    ⚠️ Do not select the Excel/spreadsheet files you are reading FROM, whose read data is to be searched on the database. 
+    If still unclear, please consult README.md.""")
+    else:
+        st.caption("""Select the spreadsheet file whose data you are reading FROM, whose read data is to be searched on the database.
+    ⚠️ Do not select the Excel/spreadsheet files you are inserting INTO the database. 
+    If still unclear, please consult README.md.""")
+
+    col1, col2 = st.columns([3, 1])
+
+    # Initialization on first run
+    if "file_paths_raw" not in st.session_state:
+        st.session_state["file_paths_raw"] = "\n".join(get_xlsx_files(cfg.XLSX_DIR))
+
+    with col1:
+        # Text area rendered first
+        file_paths_raw = st.text_area(
+            f"Files detected in '{cfg.XLSX_DIR}/':",
+            height=140,
+            key="file_paths_raw",
+        )
+
+    with col2:
+        #  callback fires BEFORE the page re-renders
+        st.space("small")
+        st.button("🔄 Refresh Directory", on_click=refresh_callback)    
+
+    # Parse and clean paths from text area
+    file_paths: list[str] = [p.strip() for p in file_paths_raw.splitlines() if p.strip()]
+
+    # Update Session State
+    if "detected_files" not in st.session_state:
+        st.session_state["detected_files"] = file_paths
+
+    # Validation & Processing
+    if len(file_paths) != st.session_state["paths_count"]:
+        st.session_state["paths_count"] = len(file_paths)
+        invalid_files = [
+            p for p in file_paths if not p.lower().endswith((".xlsx", ".xlsm"))
+        ]
+        if invalid_files:
+            st.warning(
+                f"⚠️ Non-supported extensions found: {' -- '.join(invf.split('/')[-1] for invf in invalid_files)}"
+            )
+        else:
+            with st.spinner("Processing catalogue file/s ..."):
+                for file_path in file_paths:
+                    cur_prmtrs[file_path] = {
+                        "selected_sheets": [],
+                        "min_row": 1,
+                        "max_row": None,
+                        "min_col": 1,
+                        "max_col": None,
+                        "filters": [],
+
+                    }
+                list_sheets(cur_prmtrs)
+                st.session_state["route"][0] = True
+                st.rerun()
+
+    if not st.session_state["detected_files"]:
+        st.info(f"No files found in '{cfg.XLSX_DIR}/'. Copy and paste files there and click Refresh.")
+    elif st.session_state["route"][1]:
+        st.success(f"✓")
+    else:
+        st.info('Please Ctrl + Enter inside text area when finished selecting file paths.')
+
+if st.session_state["route"][1]: # sheets filter 
+    st.divider() # ----------------------------------------------------------------------------
 
     st.subheader("Step 2: Sheets Filter")
 
     with st.form(key="sheets_filter_form"):
         st.text("Select sheet/s to process:")
 
-        for file_path, pDict in st.session_state["parameters"].items():
+        for file_path, pDict in cur_prmtrs.items():
             file_name = Path(file_path).stem
             widget_key = f"sheet_selector_{file_name}"
             selected_sheets = st.multiselect(
@@ -136,14 +162,14 @@ if st.session_state["route"][0]:
         apply_sht_filter = st.form_submit_button(label="Apply Sheets Filter")
 
     if apply_sht_filter:
-        st.session_state["route"][1] = True
+        st.session_state["route"][2] = True
         st.rerun()
-    elif st.session_state["route"][1]:
+    elif st.session_state["route"][2]:
         st.success("✓")
     else:
         st.info('Please confirm selection of sheets by clicking on the "Apply Sheets Filter" button.')
 
-if st.session_state["route"][1]:
+if st.session_state["route"][2]: # columns filter
 
     st.divider() # ----------------------------------------------------------------------------
 
@@ -152,25 +178,25 @@ if st.session_state["route"][1]:
     with st.form(key="columns_filter_form"): 
         st.text("Select column/s to process:")
 
-        for file_path, pDict in st.session_state["parameters"].items():
+        for file_path, pDict in cur_prmtrs.items():
             widget_key = f"columns_selector_{Path(file_path).stem}"
             st.caption(f"File: **{Path(file_path).stem}**")
-            col_from = st.text_input("From cloumn:", placeholder="e.g. B", key=f"{widget_key}-cf")
+            col_from = st.text_input("From column:", placeholder="e.g. B", key=f"{widget_key}-cf")
             col_to = st.text_input("To column (empty for all of them):", "", key=f"{widget_key}-ct")
             if col_from or col_to:
-                st.session_state["parameters"][file_path].update({"min_col": col_to_num(col_from), "max_col": col_to_num(col_to) if col_to else None})
+                cur_prmtrs[file_path].update({"min_col": col_from, "max_col": col_to if col_to else None})
 
         apply_col_filter = st.form_submit_button(label="Apply Columns Filter")
 
         if apply_col_filter:
-            st.session_state["route"][2] = True
+            st.session_state["route"][3] = True
             st.rerun()
-        elif st.session_state["route"][2]:
+        elif st.session_state["route"][3]:
             st.success("✓")
         else:
             st.info('Please confirm selection of columns.')
 
-if st.session_state["route"][2]:
+if st.session_state["route"][3]: # rows filter
 
     st.divider() # ----------------------------------------------------------------------------
 
@@ -179,35 +205,34 @@ if st.session_state["route"][2]:
     with st.form(key="rows_filter_form"): 
         st.text("Select row/s to process:")
 
-        for file_path, pDict in st.session_state["parameters"].items():
+        for file_path, pDict in cur_prmtrs.items():
             widget_key = f"rows_selector_{Path(file_path).stem}"
             st.caption(f"File: **{Path(file_path).stem}**")
             row_from = st.text_input("From row:", placeholder="e.g. 2", key=f"{widget_key}-rf")
             row_to = st.text_input("To row (empty for all of them):", "", key=f"{widget_key}-rt")
             if row_from or row_to:
-                st.session_state["parameters"][file_path].update({"min_row": int(row_from), "max_row": int(row_to) if row_to else None})
+                cur_prmtrs[file_path].update({"min_row": int(row_from), "max_row": int(row_to) if row_to else None})
             else:
                 st.warning("Please provide at least the first row number.")
 
         apply_row_filter = st.form_submit_button(label="Apply Rows Filter")
 
         if apply_row_filter:
-            st.session_state["route"][3] = True
+            st.session_state["route"][4] = True
             st.rerun()
-        elif st.session_state["route"][3]:
+        elif st.session_state["route"][4]:
             st.success("✓")
         else:
             st.info('Please confirm selection of rows.')
 
-
-if st.session_state["route"][3]:
+if st.session_state["route"][4]: # additional filters
 
     st.divider() # ----------------------------------------------------------------------------
 
     st.subheader("Step 4: Additional Filters")
     st.write("Note: Any empty rows are automatically omitted (including those with accidental whitespaces).")
 
-    for path, pDict in st.session_state["parameters"].items():
+    for path, pDict in cur_prmtrs.items():
         file_stem = Path(path).stem
         st.caption(f"File: **{file_stem}**")
 
@@ -216,24 +241,25 @@ if st.session_state["route"][3]:
                 st.caption(f"Filter #{idx + 1}")
 
                 f["targ_col_raw"] = st.text_input(
-                    label="Omit row when in column (leave empty for all):",
+                    label="Omit row when in column (leave empty for all columns):",
                     value=f.get("targ_col_raw", ""),
                     placeholder="e.g.: B",
-                    key=f"targ_col_{f['id']}"
+                    key=f"targ_col_{f['id']}",
+                    help="Write 'any(column, column, ...)' when one of these columns shall fulfill the condition, 'all(column, column, ...)' if all of these columns shall be targeted, or single letters."
                 )
 
-                f["omit_row_when"] = st.text_input(
+                f["wordpiece"] = st.text_input(
                     label="the cell has (leave empty for empty cell):",
-                    value=f.get("omit_row_when", ""),
+                    value=f.get("wordpiece", ""),
                     placeholder="e.g.: Sidenote",
                     key=f"omit_when_{f['id']}",
-                    help="Write */asterisk for anything NOT empty or for partial words (e.g.: num* or *33); separate multiple entries with commas or semicolons."
+                    help="Write '*'/asterisk for anything NOT empty or for partial words (e.g.: num* or *33); separate multiple entries with commas or semicolons."
                 )
 
-                if not f["targ_col_raw"] and not f["omit_row_when"]:
+                if not f["targ_col_raw"] and not f["wordpiece"]:
                     st.warning("Enter at least one input.", icon="⚠️")
-                else:
-                    f["parsed_tCol"] = col_to_num(f["targ_col_raw"])
+                elif len(f["targ_col_raw"]) > 1 and not f["targ_col_raw"].startswith("a"):
+                    st.warning("Please use 'any(column, column, ...)' or 'all(column, column, ...)' for multiple columns.", icon="⚠️")
 
                 st.button(
                     "🗑️ Delete filter",
@@ -257,20 +283,27 @@ if st.session_state["route"][3]:
         apply_cond_filters = st.form_submit_button("Apply Conditional Filters")
 
         if apply_cond_filters:
-            st.session_state["route"][4] = True
+            if active_key == "c-parameters":
+                st.session_state["route"][5] = True
+            else:
+                st.session_state["route"][7] = True
             st.rerun()
-        elif st.session_state["route"][4]:
+        elif active_key == "c-parameters" and st.session_state["route"][5] or active_key == "r-parameters" and st.session_state["route"][7]:
             st.success("✓")
         else:
             st.info('Please confirm selection of filters.')
 
+# SECTION: CATALOGUEING INTO DATABASE ===================================================
 
-if st.session_state["route"][4]:
-
+if st.session_state["route"][5] and active_key == "c-parameters": # database initialization
     st.divider() # ----------------------------------------------------------------------------
 
     st.subheader("Step 5: Database Initialization")
     st.write("Structurize the template of the database")
+
+    with st.container(border=True, gap="small"):
+        st.text("Existing table columns:")
+        st.write(" | ".join(ti for ti in get_db_columns()))
 
     skip_db_init = st.checkbox("**Skip Database Initialization? That is, data from this session is to be added to the existing database.**", value=False, key="skip_db_init")
     if not skip_db_init:
@@ -344,20 +377,22 @@ if st.session_state["route"][4]:
         with st.form(key="db_init_form"):
             apply_db_init = st.form_submit_button("Apply Database Initialization")
 
-            if apply_db_init:
-                st.session_state["route"][5] = True
+            if apply_db_init and st.session_state["db_template"]:
+                st.session_state["route"][6] = True
                 with st.spinner("Initializing database..."):
                     init_db(st.session_state["db_template"], st.session_state["db_addtnl"])
                 st.rerun()
-            elif st.session_state["route"][5]:
+            elif apply_db_init and not st.session_state["db_template"]:
+                st.error("Please add at least one category OR skip database initialization.")
+            elif st.session_state["route"][6]:
                 st.success("✓")
             else:
                 st.info('Please confirm database template.')
     else:
-        st.session_state["route"][5] = True
+        st.session_state["route"][6] = True
         st.success("✓")    
 
-if st.session_state["route"][5]:
+if st.session_state["route"][6] and active_key == "c-parameters": # transfer Coordination
 
     st.divider() # ----------------------------------------------------------------------------
 
@@ -368,23 +403,23 @@ if st.session_state["route"][5]:
 
     db_catgrs = st.session_state.get("db_template", [])
 
-    for path in st.session_state["parameters"]:
 
-        if "column_mappings" not in st.session_state["parameters"][path]:
-            st.session_state["parameters"][path]["column_mappings"] = []
+    for path in cur_prmtrs:
 
         # path shortened/stemmed
         fPath = Path(path).stem
+        fDPath = cur_prmtrs[path]
 
         # getting last/max column and converting column numbers into letters 
-        if st.session_state["parameters"][path]["max_col"] is None:
-            max_col: int = get_last_column(path)
-        fDPath = st.session_state["parameters"][path]
+        if cur_prmtrs[path].get("max_col") is None:
+            fDPath["max_col"] = get_last_column(path)
         available_columns: list = get_letters(int(fDPath["min_col"]), int(fDPath["max_col"]))
 
         st.markdown(f"### 📄 File: `{fPath}`")
 
-        file_mapping = {}
+        # Re-initializing mappings
+        column_mappings = []
+
         # loop through DB Categories and ask user to map file columns
         with st.expander(f"Configure Mappings for {fPath}", expanded=True):
             for db_cat in db_catgrs:
@@ -398,8 +433,8 @@ if st.session_state["route"][5]:
                         key=f"cols_{path}_{db_cat['id']}"
                     )
 
+                delimiter = ""
                 with col2:
-                    delimiter = ""
                     # Only show delimiter if more than 1 column is mapped to this DB category
                     if len(selected_cols) > 1:
                         delim_choice = st.selectbox(
@@ -422,30 +457,61 @@ if st.session_state["route"][5]:
                             }
                             delimiter = delim_map[delim_choice]
 
+                    if delimiter and selected_cols:
+                        preview = delimiter.join(f"(content of {col})" for col in selected_cols) 
+                        st.caption(f"Visualization: {preview}")
+
+                # Save choice to "column_mappings"
+                if selected_cols:
+                    mapping_entry: dict = {
+                        db_cat["name"]: [col for col in selected_cols]                        
+                    }
                     if delimiter:
-                        st.caption(f"Visualization: {delimiter.join("(content of " + col + ")" for col in selected_cols)}")
+                        mapping_entry.update({"delimiter": delimiter})
 
-                # Save choice to dictionary
-                file_mapping = {
-                    db_cat["name"]: [col_to_num(col) for col in selected_cols],
-                    "delimiter": delimiter
-                }
-
-                if file_mapping not in st.session_state["parameters"][path]["column_mappings"]: 
-                    st.session_state["parameters"][path]["column_mappings"].append(file_mapping)
+                    column_mappings.append(mapping_entry)
+                    
+        cur_prmtrs[path].update({"column_mappings": column_mappings})
 
     with st.form(key="transfer_coord_form"):
-
         transfer_coord = st.form_submit_button(label="Transfer Data")
 
+    result = None
     if transfer_coord:
         with st.spinner("Transferring data..."):
-            #process_spdsht_files(st.session_state["parameters"], st.session_state["column_mappings"])
-            st.session_state["route"][6] = True
+            result = process_spreadsheet_files("catalogue", cur_prmtrs)
+            st.session_state["route"][7] = True
             st.rerun()
-    elif st.session_state["route"][6]:
+    elif st.session_state["route"][7]:
         st.success("✓")
+        st.write(result)
     else:
         st.info('Please confirm transfer of data.')
 
-    
+# SECTION: SEARCHING ON THE DB ==========================================================
+
+if st.session_state["route"][7] and active_key == "s-parameters": # hint for duplicating file, setting result population column and starting search
+    st.divider() # ----------------------------------------------------------------------------
+
+    st.subheader("Select the column on which the results shall be populated.")
+
+    with st.form(key="slctn_of_result_col"): 
+        chosen_Rcol = st.text_input("choose column:", placeholder="e.g. N", key="result_col_slctn")
+        if chosen_Rcol:
+            st.success("✓")
+            st.session_state["parameters"].update({"slctd_Rcol": chosen_Rcol if chosen_Rcol else None})
+        else:
+            st.warning("Please provide a column.")
+
+        checked = st.checkbox(label="Source file is duplicated to avoid overwriting the original file.", value=False, key="duplicate_source")
+        apply_Rcol = st.form_submit_button(label="Apply Column and start the search.")
+
+    if apply_Rcol and checked:
+        with st.spinner(text="working ...", show_time=True):
+            end_of_process = process_spreadsheet_files("search", cur_prmtrs)
+            if end_of_process: 
+                st.success("✓")
+            else:
+                st.warning("Something went wrong.")
+    else:
+        st.info('Please confirm selection of column by clicking on the "Apply Column and start the search" button.')

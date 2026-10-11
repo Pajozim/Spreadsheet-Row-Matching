@@ -2,44 +2,10 @@ import streamlit as st
 import uuid
 import config as cfg
 import openpyxl as opxl
-from openpyxl.utils import get_column_letter
+
 from pathlib import Path
-from openpyxl import Workbook
-#from src.excel_automation.py_files.process_catalogues import process_ctlg_files
+from openpyxl.utils import get_column_letter
 
-#@st.cache_resource
-#def get_cache()
-
-"""visualization of:
-st.session_state["parameters"] = parameters = {
-    "PATH1": {
-        "selected_sheets": ["sheet1", "sheet2", ...],
-        "min_row": 1,
-        "max_row": None,
-        "min_col": 1,
-        "max_col": None,
-        "filters": [
-            {
-                "id": "1",
-                "targ_col_raw": "B",
-                "omit_row_when": "Sidenote",
-                "parsed_tCol": 2
-            },
-            {...},
-            ...
-        ],
-        "column_mappings": [ 
-                {"DB_CAT1": [1, 2, 3], "delimiter": "+"},
-                {"DB_CAT2": [4], "delimiter": ""},
-                {"DB_CAT3": [5]}
-            ],
-    },
-    "PATH2": {
-        ...
-    },
-    ...
-}
-"""
 
 def get_xlsx_files(folder: Path = cfg.XLSX_DIR) -> list:
     """Scans the directory for .xlsx files and returns absolute path strings."""
@@ -61,15 +27,22 @@ def refresh_callback() -> None:
     st.session_state["file_paths_raw"] = "\n".join(fresh_files)
 
 
-def col_to_num(col: str) -> int | None:
-    """Converts Excel column letter(s) like 'A' or 'AA' to 1-based index."""
+def list_sheets(parameters: dict) -> None:
+    for path in parameters:
+        wb = opxl.load_workbook(path, read_only=True)
+        parameters[path]["selected_sheets"] = wb.sheetnames
+        wb.close()
+
+
+def col_to_num(col: str, idx: int = 1) -> int:
+    """Converts Excel column letter(s) like 'A' or 'AA' to 1-based index.
+    Unless idx is set to 0, which then returns 0-based index.
+    """
     col = col.strip().upper()
-    if not col or not col.isalpha():
-        return None
     
     num = 0
     for char in col:
-        num = num * 26 + (ord(char) - ord('A') + 1)
+        num = num * 26 + (ord(char) - ord('A') + idx)
     return num
 
 
@@ -141,3 +114,6 @@ def get_last_column(path: Path) -> int:
 
 def get_letters(min_col: int, max_col: int) -> list:
     return [get_column_letter(i) for i in range(min_col, max_col + 1)]
+
+
+
