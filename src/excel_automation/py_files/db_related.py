@@ -1,7 +1,9 @@
 import sqlite3
 import re
 import config as cfg
+
 from pathlib import Path
+from typing import Literal
 
 def get_db_connection() -> sqlite3.Connection:
     """Connect to SQLite database and return connection."""
@@ -87,7 +89,6 @@ def init_db(cat_list: list[dict], addtnl_list: dict | None = None, drop_tables: 
         CREATE TABLE IF NOT EXISTS catalogue_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             {joined_catgrs},
-            sheets TEXT,
             cell_ref TEXT
         );"""
     cursor.execute(query)
@@ -147,17 +148,24 @@ def init_db(cat_list: list[dict], addtnl_list: dict | None = None, drop_tables: 
     print("Database initiated successfully.")
 
 
-def get_db_columns(table_name: str = "catalogue_items") -> list[str]:
+def get_db_columns(table_name: Literal["catalogue_items", "catalogue_fts"]) -> list[str]:
     """Return column names and data types for a given table."""
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute(f"PRAGMA table_info({table_name})")
-    table_info = cursor.fetchall()
+    column_names = []
+    match table_name:
+        case "catalogue_items":
+            cursor.execute(f"PRAGMA table_info({table_name})")
+            table_info = cursor.fetchall()
+            column_names = [ti[1] for ti in table_info] if table_info else []
+        case "catalogue_fts":
+            cursor.execute(f"SELECT * FROM {table_name} LIMIT 0")
+            column_names = [col[0] for col in cursor.description]
     conn.close()
-    return [ti[1] for ti in table_info] if table_info else []
+    return column_names
 
 
-def insert_catalogue_rows(rows: list[dict], columns: list[dict]) -> bool:
+def insert_catalogue_rows(rows: list[dict], columns: list[dict]) -> tuple[bool, str]:
     """Bulk insert parsed catalogue rows into SQLite."""
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -172,8 +180,8 @@ def insert_catalogue_rows(rows: list[dict], columns: list[dict]) -> bool:
 
     # 3. Construct the final query
     query = f"""
-        INSERT INTO catalogue_items ({cols_sql}, sheets, cell_ref)
-        VALUES ({values_sql}, :sheets, :cell_ref)
+        INSERT INTO catalogue_items ({cols_sql}, cell_ref)
+        VALUES ({values_sql}, :cell_ref)
     """
 
     # 4. Execute using the dictionary keys matching the placeholders
@@ -181,10 +189,11 @@ def insert_catalogue_rows(rows: list[dict], columns: list[dict]) -> bool:
 
     conn.commit()
     conn.close()
-    
-    print(f"Successfully inserted {len(rows)} items into database.")
 
-    return True
+    success = f"Successfully inserted {len(rows)} items into database."
+    print(success)
+
+    return True, success
 
 
 def parse_clave_to_sheet(clave: str) -> str:
@@ -206,168 +215,50 @@ def parse_clave_to_sheet(clave: str) -> str:
     return sheet_name if sheet_name else first_three_digits
 
 
-def keyword_search(keywords: list[str], unit: str, context: list[str], max_results: int) -> list[dict]:
-    # context parameter should be lowercase (should've been done in caller function)
-
+def keyword_search(payload: list[str], max_results: int = 3) -> list[dict]:
     # Connect to database
     conn = sqlite3.connect(cfg.DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
     # Clean keywords to prevent SQL FTS syntax errors
-    clean_kw = [kw.strip().replace('"', '') for kw in keywords if kw.strip()]
+    clean_kw = [kw.strip().replace('"', '') for kw in payload if kw.strip()]
     if not clean_kw:
         return []
     # Construct a FTS query: e.g., "CONDICIONES"* OR "GENERALES"*
     joint_kws = ' OR '.join(f'\"{kw}\"*' for kw in clean_kw)
-    fts_query = f'col1:({joint_kws})'
 
     results = []
-    current_search_matches = None
-
-    # =========================================================================
-    # STAGE 1: Top 2 results from INSUMOS (Sheet: 'Subcontratos')
-    # =========================================================================
-
-    # 1. Try to find the Context Header in Subcontratos (clave ends in '000')
-    f3_digits = None
-
-    for scope in context:
-        # context parameters, visuals on scope for instance can be "preliminares*" or "mobiliario* OR equipo* OR cocina*"
-        context_fts_query = f'col1:{scope}'
-
-        # Try to find the Context Header in Subcontratos
-        cursor.execute("""
-            SELECT c.clave
-            FROM catalogue_items c
-            JOIN catalogue_fts fts ON c.id = fts.rowid
-            WHERE c.sheet = 'subcontratos'
-            AND c.clave LIKE '%000'
-            AND catalogue_fts MATCH ?
-            ORDER BY rank
-            LIMIT 1
-        """, (context_fts_query,))
+ 
+    cursor.execute("""
+        SELECT c.*
+        FROM catalogue_items c
+        JOIN catalogue_fts fts ON c.id = fts.rowid
+        WHERE catalogue_fts MATCH ?
+        ORDER BY rank
+        LIMIT ?
+    """, (joint_kws, max_results,))
         
-        header_match = cursor.fetchone()
-    
-        if header_match and header_match["clave"]:
-            # Extract clave and take the first 3 digits (e.g., "4-03-1-000" -> "4-03")
-            f3_digits = str(header_match["clave"])[:4] # str() is defensive here; usually it shall be always a string
-            break
-
-    # 2. Query Subcontratos for top 2 keyword matches (Scoped vs. Free Search)
-    if f3_digits:
-        # Scoped Search: Restrict to rows matching the discipline/context prefix
-        cursor.execute("""
-            SELECT c.* 
-            FROM catalogue_items c
-            JOIN catalogue_fts fts ON c.id = fts.rowid
-            WHERE c.sheet = 'subcontratos'
-            AND c.unit = ?
-            AND c.clave LIKE ?
-            AND catalogue_fts MATCH ?
-            ORDER BY rank
-            LIMIT ?
-        """, (unit, f"{f3_digits}%", fts_query, max_results,))
-
-    else:
-        # Fallback Free Search: Query across all of Subcontratos
-        cursor.execute("""
-            SELECT c.* 
-            FROM catalogue_items c
-            JOIN catalogue_fts fts ON c.id = fts.rowid
-            WHERE c.sheet = 'subcontratos'
-            AND c.unit = ?
-            AND catalogue_fts MATCH ?
-            ORDER BY rank
-            LIMIT ?
-        """, (unit, fts_query, max_results,))
-    
-    insumos_matches: list[dict] = [dict(row) for row in cursor.fetchall()]
-    results.extend(insumos_matches)
-
-    # =========================================================================
-    # STAGE 2: Top 2 results from MATRICES (via Catalogo General)
-    # =========================================================================
-    
-    general_match = None
-    fallback_search = False
-
-    for scope in context:
-        # context parameters, visuals on scope for instance can be "preliminares*" or "mobiliario* OR equipo* OR cocina*"
-        context_fts_query = f'col1:{scope}'
-        
-        cursor.execute("""
-            SELECT c.clave, c.col1, c.*
-            FROM catalogue_items c
-            JOIN catalogue_fts fts ON c.id = fts.rowid
-            WHERE c.sheet = 'catalogo general'
-            AND catalogue_fts MATCH ?
-            ORDER BY rank
-            LIMIT 1
-        """, (context_fts_query,))
-        
-        general_match = cursor.fetchone()
-
-        # sometimes the first title/context is too specific to be found in 'Catalogo General'
-        # but unfortunately, so can be the second title/context
-        if general_match:
-            break
-
-    if general_match:
-        # 1. Extract clave (e.g., "09-1" -> "091" -> "91")
-        raw_clave = general_match["clave"]  # e.g., "09-1"
-        target_sheet = parse_clave_to_sheet(raw_clave)  # Output: "91"
-
-        # 2. Query target sheet for the best match by ranking quantity of matches
-        cursor.execute("""
-            SELECT c.* 
-            FROM catalogue_items c
-            JOIN catalogue_fts fts ON c.id = fts.rowid
-            WHERE c.sheet = ?
-              AND c.unit = ?
-              AND catalogue_fts MATCH ?
-            ORDER BY rank
-            LIMIT ?
-        """, (target_sheet, unit, fts_query, max_results,))
-
-        current_search_matches = cursor.fetchall()
-        if not current_search_matches:
-            fallback_search = True
-
-    if fallback_search or not general_match:
-
-        # Fallback to all alround search
-        cursor.execute("""
-            SELECT c.*
-            FROM catalogue_items c
-            JOIN catalogue_fts fts ON c.id = fts.rowid
-            WHERE c.sheet != 'subcontratos'
-                AND c.unit = ?
-                AND catalogue_fts MATCH ?
-            ORDER BY rank
-            LIMIT ?
-        """, (unit, fts_query, max_results,))
-        
-    cursor_matches = current_search_matches or cursor.fetchall()
+    cursor_matches = cursor.fetchall()
     target_activity_match: list = [dict(row) for row in cursor_matches]
     if target_activity_match:
         results.extend(target_activity_match)
 
     conn.close()
 
-    print("results: ", results)
-
     return results
 
 
-def show_db(fts: bool = False) -> list:
+def show_db(conditional: Literal["all", "fts", "random"]) -> list[tuple]:
     conn = sqlite3.connect(cfg.DB_PATH)
     cursor = conn.cursor()
-    if fts:
-        cursor.execute("SELECT * FROM catalogue_fts")
-    else:
-        cursor.execute("SELECT * FROM catalogue_items LIMIT 20")
+    match conditional:
+        case "fts":
+            cursor.execute("SELECT * FROM catalogue_fts")
+        case "all":
+            cursor.execute("SELECT * FROM catalogue_items")
+        case "random":
+            cursor.execute("SELECT * FROM catalogue_items ORDER BY RANDOM() LIMIT 20")
     rows = cursor.fetchall()
     #for row in rows: print(row)
     conn.close()

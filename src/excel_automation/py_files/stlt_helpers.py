@@ -46,7 +46,7 @@ def col_to_num(col: str, idx: int = 1) -> int:
     return num
 
 
-def add_filter_callback(file_path: str):
+def add_filter_callback(crntPrmtrs_with_path: dict):
     """
     Appends a new filter dictionary with a unique ID to the specific file's filter list.
     """
@@ -59,22 +59,21 @@ def add_filter_callback(file_path: str):
     }
 
     # 2. Mutate list in session state
-    st.session_state["parameters"][file_path]["filters"].append(new_filter)
+    crntPrmtrs_with_path["filters"].append(new_filter)
 
 
-def delete_filter_callback(filter_id: str, file_path: str):
+def delete_filter_callback(filter_id: str, crntPrmtrs_with_path: dict):
     """
     Deletes a filter by its unique ID and cleans up associated widget state keys.
     """
-    state = st.session_state.get("parameters", {})
-    fPath = state.get(file_path, {})
-    filters_data = fPath.get("filters", [])
 
-    if state and file_path and filters_data:
+    if crntPrmtrs_with_path:
         # 1. Filter out the targeted item by ID
-        st.session_state["parameters"][file_path]["filters"] = [
-            f for f in st.session_state["parameters"][file_path]["filters"] if f["id"] != filter_id
+        crntPrmtrs_with_path["filters"] = [
+            f for f in crntPrmtrs_with_path["filters"] if f["id"] != filter_id
         ]
+    else:
+        print("Error: cur_prmters_with_path is None")
 
     # 2. Clean up explicit widget keys from session state to avoid key ghosting
     widget_keys_to_remove = [

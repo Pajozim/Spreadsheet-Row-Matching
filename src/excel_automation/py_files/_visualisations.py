@@ -35,9 +35,9 @@ st.session_state["c-parameters"] = parameters = {
             ...
         ],
         "column_mappings": [
-                {"DB_CAT1": ["A", "B", "D"], "delimiter": "+"},
-                {"DB_CAT2": ["E"]},
-                {"DB_CAT3": ["G"]},
+                {"DB_CAT1": [0, 1, 2], "delimiter": "-"},
+                {"DB_CAT2": [3]},
+                {"DB_CAT3": [4]},
                 ...
             ],
     },
@@ -84,7 +84,28 @@ st.session_state["s-parameters"] = {
                 "targ_col_raw": "B",
                 "wordpiece": "Sidenote",
             },
+        "result_col": "N",
         ...,
     },
 }
+"""
+
+"""
+payload = {
+    "PATH1": [
+        {
+            "kws": ["LTFR-01", "Suministro", "fabricación", ...],
+            "texts": "(LTFR-01) Suministro, fabricación y elaboración de LAMBRIN de panel de yeso con ... pieza ...",
+            "wb":  <openpyxl.workbook.workbook.Workbook object at 0x7e7580ba61b0>, 
+            "sheet": Luminarios, 
+            "result_col": 14, 
+            "row": 24
+        },
+        ...
+    ],
+    "PATH2": [
+        ...
+    ],
+    ...
+`}
 """

@@ -5,8 +5,9 @@ import pandas as pd
 from io import StringIO
 from pathlib import Path
 from src.excel_automation.py_files.process_files import process_spreadsheet_files
+from src.excel_automation.py_files.semantic_search import prep_batch, embed_catalogues
 from src.excel_automation.py_files.db_related import init_db, get_db_columns, show_db
-from src.excel_automation.py_files.stlt_helpers import get_xlsx_files, refresh_callback, add_filter_callback, delete_filter_callback, add_category_callback, delete_category_callback, get_last_column, get_letters, list_sheets
+from src.excel_automation.py_files.stlt_helpers import get_xlsx_files, refresh_callback, col_to_num, add_filter_callback, delete_filter_callback, add_category_callback, delete_category_callback, get_last_column, get_letters, list_sheets
 
 
 print("Starting Streamlit ... \n")
@@ -22,14 +23,16 @@ st.set_page_config(page_title="Catalogue Matcher", layout="wide")
 # SECTION: SESSION_STATE VISUALIZATION
 # ==========================================
 
-if "c-parameters" not in st.session_state:
-    st.session_state["c-parameters"] = {}
-if "s-parameters" not in st.session_state:
-    st.session_state["s-parameters"] = {}
+
 if "paths_count" not in st.session_state:
     st.session_state["paths_count"] = 0
 if "route" not in st.session_state:
     st.session_state["route"] = [False, False, False, False, False, False, False, False, False] # current length: 9
+    
+if "embedding_error" not in st.session_state:
+    st.session_state.embedding_error = None
+if "is_catalog_ready" not in st.session_state:
+    st.session_state.is_catalog_ready = False
 
 
 # SECTION: ACTION MENU ==================================================================
@@ -38,8 +41,10 @@ st.title("📋 Retrieval System from Spreadsheet Files (Excel)")
 
 col1, col2 = st.columns([1, 3])
 
-active_key = "c-parameters" 
-cur_prmtrs = None
+active_key = "c-parameters" if "c-parameters" in st.session_state else "s-parameters"
+if active_key not in st.session_state:
+    st.session_state[active_key] = {}
+cur_prmtrs = st.session_state[active_key]
 
 with st.container(horizontal=True, vertical_alignment="top"):
     with col1:
@@ -47,14 +52,40 @@ with st.container(horizontal=True, vertical_alignment="top"):
         action = st.menu_button("Which action?", ["Create, update or add more data to the database", "Search on the database"])
         if action == "Create, update or add more data to the database":
             st.session_state["route"][0] = True
+            for sst in st.session_state["route"][1:]:
+                sst = False
+            active_key = "c-parameters"
+            if "s-parameters" in st.session_state:
+                del st.session_state["s-parameters"]
+            if active_key not in st.session_state:
+                st.session_state[active_key] = {}
+            cur_prmtrs = st.session_state[active_key]
         elif action == "Search on the database":
-            st.session_state["route"][7] = True
+            
+            try:
+                # When this runs, if it fails, it throws an exception handled right here
+                prep_batch()
+                embed_catalogues()
+                st.session_state.is_catalog_ready = True
+                st.session_state.embedding_error = None
+            except Exception as e:
+                st.session_state.is_catalog_ready = False
+                st.session_state.embedding_error = str(e)
+            
+            st.session_state["route"][0] = True
+            for sst in st.session_state["route"][1:]:
+                sst = False
             active_key = "s-parameters"
-        cur_prmtrs = st.session_state[active_key]
+            if "c-parameters" in st.session_state:
+                del st.session_state["c-parameters"]
+                if active_key not in st.session_state:
+                    st.session_state[active_key] = {}
+            cur_prmtrs = st.session_state[active_key]
 
     with col2:
         st.caption("Database preview:")
-        st.write(pd.DataFrame(show_db()[:5], columns=get_db_columns()))
+        st.write(pd.DataFrame(show_db("random")[:5], columns=get_db_columns("catalogue_items")))
+
 
 # SECTION: SHARED PARAMETER SELECTION ===================================================
 
@@ -74,11 +105,11 @@ if st.session_state["route"][0]: # files paths
     st.subheader("Step 1: File Reader & Paths")
     if active_key == "c-parameters":
          st.caption("""Select the spreadsheet files whose data will serve as the search database (data you are inserting INTO the database).
-    ⚠️ Do not select the Excel/spreadsheet files you are reading FROM, whose read data is to be searched on the database. 
+    \n ⚠️ Do NOT select the Excel/spreadsheet files you are reading FROM, whose read data is to be searched on the database. 
     If still unclear, please consult README.md.""")
     else:
         st.caption("""Select the spreadsheet file whose data you are reading FROM, whose read data is to be searched on the database.
-    ⚠️ Do not select the Excel/spreadsheet files you are inserting INTO the database. 
+    \n ⚠️ Do NOT select the Excel/spreadsheet files you are inserting INTO the database. 
     If still unclear, please consult README.md.""")
 
     col1, col2 = st.columns([3, 1])
@@ -119,6 +150,9 @@ if st.session_state["route"][0]: # files paths
             )
         else:
             with st.spinner("Processing catalogue file/s ..."):
+                for path in cur_prmtrs.keys():
+                    if path not in file_paths:
+                        del cur_prmtrs[path]
                 for file_path in file_paths:
                     cur_prmtrs[file_path] = {
                         "selected_sheets": [],
@@ -130,7 +164,7 @@ if st.session_state["route"][0]: # files paths
 
                     }
                 list_sheets(cur_prmtrs)
-                st.session_state["route"][0] = True
+                st.session_state["route"][1] = True
                 st.rerun()
 
     if not st.session_state["detected_files"]:
@@ -151,10 +185,11 @@ if st.session_state["route"][1]: # sheets filter
         for file_path, pDict in cur_prmtrs.items():
             file_name = Path(file_path).stem
             widget_key = f"sheet_selector_{file_name}"
+            sheets = pDict.get("selected_sheets", [])
             selected_sheets = st.multiselect(
                 label=f"File: **{file_name}**",
-                options=pDict["selected_sheets"],
-                default=pDict["selected_sheets"],
+                options=sheets,
+                default=sheets,
                 key=widget_key
             )
             pDict["selected_sheets"] = selected_sheets 
@@ -181,10 +216,12 @@ if st.session_state["route"][2]: # columns filter
         for file_path, pDict in cur_prmtrs.items():
             widget_key = f"columns_selector_{Path(file_path).stem}"
             st.caption(f"File: **{Path(file_path).stem}**")
-            col_from = st.text_input("From column:", placeholder="e.g. B", key=f"{widget_key}-cf")
-            col_to = st.text_input("To column (empty for all of them):", "", key=f"{widget_key}-ct")
-            if col_from or col_to:
-                cur_prmtrs[file_path].update({"min_col": col_from, "max_col": col_to if col_to else None})
+            col_from = st.text_input("From column:", placeholder="e.g. B", value=st.session_state.get(f"{widget_key}-cf", ""), key=f"{widget_key}-cf")
+            col_to = st.text_input("To column (empty for all of them; or for single column, write letter again):", value=st.session_state.get(f"{widget_key}-ct", ""), key=f"{widget_key}-ct")
+            if col_from is None:
+                st.warning("Please provide a column.")
+            elif col_from or col_to:
+                cur_prmtrs[file_path].update({"min_col": col_to_num(col_from, 1), "max_col": col_to_num(col_to, 1) if col_to else None})
 
         apply_col_filter = st.form_submit_button(label="Apply Columns Filter")
 
@@ -208,12 +245,12 @@ if st.session_state["route"][3]: # rows filter
         for file_path, pDict in cur_prmtrs.items():
             widget_key = f"rows_selector_{Path(file_path).stem}"
             st.caption(f"File: **{Path(file_path).stem}**")
-            row_from = st.text_input("From row:", placeholder="e.g. 2", key=f"{widget_key}-rf")
-            row_to = st.text_input("To row (empty for all of them):", "", key=f"{widget_key}-rt")
-            if row_from or row_to:
+            row_from = st.text_input("From row:", placeholder="e.g. 2", value=st.session_state.get(f"{widget_key}-rf", ""), key=f"{widget_key}-rf")
+            row_to = st.text_input("To row (empty for all of them; when only one row, write number again):", value=st.session_state.get(f"{widget_key}-rt", ""), key=f"{widget_key}-rt")
+            if row_from:
                 cur_prmtrs[file_path].update({"min_row": int(row_from), "max_row": int(row_to) if row_to else None})
             else:
-                st.warning("Please provide at least the first row number.")
+                st.warning("Please provide - at least - the first row number.")
 
         apply_row_filter = st.form_submit_button(label="Apply Rows Filter")
 
@@ -264,7 +301,7 @@ if st.session_state["route"][4]: # additional filters
                 st.button(
                     "🗑️ Delete filter",
                     on_click=delete_filter_callback,
-                    args=[f["id"], path],
+                    args=[f["id"], cur_prmtrs[path]],
                     key=f"del_{f['id']}"
                 )
 
@@ -272,7 +309,7 @@ if st.session_state["route"][4]: # additional filters
         st.button(
             "➕ Add a filter",
             on_click=add_filter_callback,
-            args=[path],
+            args=[cur_prmtrs[path]],
             key=f"add_{path}"  # Safe key using file path
         )
 
@@ -288,10 +325,11 @@ if st.session_state["route"][4]: # additional filters
             else:
                 st.session_state["route"][7] = True
             st.rerun()
-        elif active_key == "c-parameters" and st.session_state["route"][5] or active_key == "r-parameters" and st.session_state["route"][7]:
+        elif active_key == "c-parameters" and st.session_state["route"][5] or active_key == "s-parameters" and st.session_state["route"][7]:
             st.success("✓")
         else:
             st.info('Please confirm selection of filters.')
+
 
 # SECTION: CATALOGUEING INTO DATABASE ===================================================
 
@@ -303,7 +341,7 @@ if st.session_state["route"][5] and active_key == "c-parameters": # database ini
 
     with st.container(border=True, gap="small"):
         st.text("Existing table columns:")
-        st.write(" | ".join(ti for ti in get_db_columns()))
+        st.write(" | ".join(ti for ti in get_db_columns("catalogue_items")))
 
     skip_db_init = st.checkbox("**Skip Database Initialization? That is, data from this session is to be added to the existing database.**", value=False, key="skip_db_init")
     if not skip_db_init:
@@ -413,7 +451,7 @@ if st.session_state["route"][6] and active_key == "c-parameters": # transfer Coo
         # getting last/max column and converting column numbers into letters 
         if cur_prmtrs[path].get("max_col") is None:
             fDPath["max_col"] = get_last_column(path)
-        available_columns: list = get_letters(int(fDPath["min_col"]), int(fDPath["max_col"]))
+        available_columns: list = get_letters(fDPath["min_col"], fDPath["max_col"])
 
         st.markdown(f"### 📄 File: `{fPath}`")
 
@@ -464,7 +502,7 @@ if st.session_state["route"][6] and active_key == "c-parameters": # transfer Coo
                 # Save choice to "column_mappings"
                 if selected_cols:
                     mapping_entry: dict = {
-                        db_cat["name"]: [col for col in selected_cols]                        
+                        db_cat["name"]: [col_to_num(col, 0) for col in selected_cols]                        
                     }
                     if delimiter:
                         mapping_entry.update({"delimiter": delimiter})
@@ -476,17 +514,20 @@ if st.session_state["route"][6] and active_key == "c-parameters": # transfer Coo
     with st.form(key="transfer_coord_form"):
         transfer_coord = st.form_submit_button(label="Transfer Data")
 
-    result = None
+    result, success = False, ""
     if transfer_coord:
-        with st.spinner("Transferring data..."):
-            result = process_spreadsheet_files("catalogue", cur_prmtrs)
-            st.session_state["route"][7] = True
-            st.rerun()
-    elif st.session_state["route"][7]:
-        st.success("✓")
-        st.write(result)
-    else:
+        with st.spinner("Transferring data...", show_time=True):
+            result, success = process_spreadsheet_files("catalogue", cur_prmtrs)
+            if result:
+                st.success("✓")
+                st.write(success)
+                st.write("The transfer is complete. The database is ready for search. For search go to menu and select 'Search on the database'.")
+            st.session_state["route"][8] = True
+    elif not st.session_state["route"][8]:
         st.info('Please confirm transfer of data.')
+    else:
+        st.write("The transfer is complete. The database is ready for search. For search go to menu and select 'Search on the database'.")
+    
 
 # SECTION: SEARCHING ON THE DB ==========================================================
 
@@ -495,23 +536,44 @@ if st.session_state["route"][7] and active_key == "s-parameters": # hint for dup
 
     st.subheader("Select the column on which the results shall be populated.")
 
-    with st.form(key="slctn_of_result_col"): 
-        chosen_Rcol = st.text_input("choose column:", placeholder="e.g. N", key="result_col_slctn")
-        if chosen_Rcol:
-            st.success("✓")
-            st.session_state["parameters"].update({"slctd_Rcol": chosen_Rcol if chosen_Rcol else None})
-        else:
-            st.warning("Please provide a column.")
+    with st.form(key="slctn_of_result_col"):
+        for path in cur_prmtrs:
+            widget_key=f"result_col_slctn_{Path(path).stem}"
+            st.caption(f"File: **{Path(path).stem}**")
+            chosen_Rcol = st.text_input("choose column:", placeholder="e.g. N", value=st.session_state.get(f"{widget_key}_rc", ""), key=f"{widget_key}_rc")
+            if chosen_Rcol:
+                st.success("✓")
+                for path in cur_prmtrs:
+                    cur_prmtrs[path].update({"results_col": chosen_Rcol})
+            elif cur_prmtrs[path].get("result_col") is None:
+                st.warning("Please provide a column.")
 
         checked = st.checkbox(label="Source file is duplicated to avoid overwriting the original file.", value=False, key="duplicate_source")
         apply_Rcol = st.form_submit_button(label="Apply Column and start the search.")
 
     if apply_Rcol and checked:
         with st.spinner(text="working ...", show_time=True):
-            end_of_process = process_spreadsheet_files("search", cur_prmtrs)
+            end_of_process, success = process_spreadsheet_files("search", cur_prmtrs)
             if end_of_process: 
                 st.success("✓")
+                st.write(success)
+                st.write("The search is complete. Check on the file.")
+                st.session_state["route"][8] = True
             else:
                 st.warning("Something went wrong.")
+    elif not st.session_state["route"][8]:
+        st.info('Please confirm selection of column by clicking on the "Apply Column ..." button and checked on the hint.')
     else:
-        st.info('Please confirm selection of column by clicking on the "Apply Column and start the search" button.')
+        st.write("The search is complete. Check on the file. For a new search go to menu and select 'Search on the database' or 'Create, update or add more data to the database'.")
+
+
+# SECTION: Error panel ==================================================================
+
+if st.session_state.get("embedding_error"):
+    with st.expander("⚠️ Catalog Embedding Failed (Click for details)", expanded=True):
+        st.error(st.session_state.embedding_error)
+        
+        if st.button("Retry Embedding"):
+            st.session_state.embedding_error = None
+            # Trigger your embedding function here
+            st.rerun()
