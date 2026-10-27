@@ -26,5 +26,5 @@ A lightweight desktop application built to automate complex row-matching workflo
 
 1. **Clone the repository:**
    ```bash
-   git clone [https://github.com/your-username/excel-semantic-automation.git](https://github.com/your-username/excel-semantic-automation.git)
-   cd excel-semantic-automation
+   git clone [https://github.com/Pajozim/Spreadsheet-Row-Matching.git](https://github.com/Pajozim/Spreadsheet-Row-Matching.git)
+   cd Spreadsheet-Row-Matching
