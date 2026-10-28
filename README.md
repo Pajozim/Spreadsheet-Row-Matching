@@ -1,6 +1,6 @@
-# Excel Hybrid Semantic & SQL Automation Engine
+# Excel Semantic & SQL Search Engine
 
-A lightweight desktop application built to automate complex row-matching workflows across spreadsheets by combining structured SQL filtering with local vector-based semantic search.
+A lightweight desktop application built to accelerate row-matching workflows across spreadsheets by using structured SQL filtering and local vector-based semantic search.
 
 ---
 
